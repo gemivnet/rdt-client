@@ -183,29 +183,43 @@ public class Torrents(
 
     public virtual async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent, String? realMagnet = null)
     {
-        // SeasonSplit: when realMagnet is supplied, hash is taken from the
-        // synthetic magnetLink (so siblings stay distinct in the local DB
-        // and qBit API), while the real magnet is what we ship to the
-        // debrid provider.
-        var debridMagnet = String.IsNullOrWhiteSpace(realMagnet) ? magnetLink : realMagnet;
+        // SeasonSplit: a synthetic magnet from a Sonarr fork carries two
+        // optional `x.` query parameters that override how we talk to the
+        // debrid provider. We strip them out of the magnet before parsing
+        // so MonoTorrent.MagnetLink doesn't choke on unknown params.
+        var (cleanMagnet, embeddedRealMagnet, embeddedSeasons) = ExtractSeasonSplitParams(magnetLink);
+
+        var effectiveRealMagnet = !String.IsNullOrWhiteSpace(realMagnet) ? realMagnet : embeddedRealMagnet;
+        if (!String.IsNullOrWhiteSpace(embeddedSeasons) && String.IsNullOrWhiteSpace(torrent.IncludeRegex))
+        {
+            torrent.IncludeRegex = SeasonsToIncludeRegex(embeddedSeasons);
+            logger.LogInformation("[SeasonSplit] Magnet-embedded seasons={seasons} -> IncludeRegex='{regex}'",
+                                  embeddedSeasons, torrent.IncludeRegex);
+        }
+
+        // SeasonSplit: when realMagnet is supplied (via form param or x.realmagnet),
+        // hash is taken from the synthetic magnetLink (so siblings stay distinct
+        // in the local DB and qBit API), while the real magnet is what we ship
+        // to the debrid provider.
+        var debridMagnet = String.IsNullOrWhiteSpace(effectiveRealMagnet) ? cleanMagnet : effectiveRealMagnet;
         var enriched = await enricher.EnrichMagnetLink(debridMagnet);
         MagnetLink magnet;
 
         try
         {
-            magnet = MagnetLink.Parse(magnetLink);
+            magnet = MagnetLink.Parse(cleanMagnet);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "{ex.Message}, trying to parse {magnetLink}", ex.Message, magnetLink);
+            logger.LogError(ex, "{ex.Message}, trying to parse {magnetLink}", ex.Message, cleanMagnet);
 
-            throw new($"{ex.Message}, trying to parse {magnetLink}");
+            throw new($"{ex.Message}, trying to parse {cleanMagnet}");
         }
 
-        if (!String.IsNullOrWhiteSpace(realMagnet))
+        if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
         {
             logger.LogInformation("[SeasonSplit] Using real magnet for debrid (length={debridLen}), local synth hash from urls (length={synthLen})",
-                                  debridMagnet.Length, magnetLink.Length);
+                                  debridMagnet.Length, cleanMagnet.Length);
         }
 
         if (!String.IsNullOrWhiteSpace(Settings.Get.General.BannedTrackers))
@@ -1208,5 +1222,79 @@ public class Torrents(
         var hashBytes = md5.ComputeHash(bytes);
 
         return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+    }
+
+    // SeasonSplit helpers: pulls the x.realmagnet / x.includeseasons hints out
+    // of the magnet URL and returns a cleaned magnet plus the extracted values.
+    private static (String CleanMagnet, String? RealMagnet, String? Seasons) ExtractSeasonSplitParams(String magnetLink)
+    {
+        if (String.IsNullOrEmpty(magnetLink) ||
+            (magnetLink.IndexOf("x.realmagnet=", StringComparison.OrdinalIgnoreCase) < 0 &&
+             magnetLink.IndexOf("x.includeseasons=", StringComparison.OrdinalIgnoreCase) < 0))
+        {
+            return (magnetLink, null, null);
+        }
+
+        var queryIdx = magnetLink.IndexOf('?');
+        if (queryIdx < 0)
+        {
+            return (magnetLink, null, null);
+        }
+
+        var prefix = magnetLink.Substring(0, queryIdx + 1);
+        var query = magnetLink.Substring(queryIdx + 1);
+        var parts = query.Split('&', StringSplitOptions.RemoveEmptyEntries);
+
+        String? realMagnet = null;
+        String? seasons = null;
+        var kept = new System.Collections.Generic.List<String>(parts.Length);
+
+        foreach (var part in parts)
+        {
+            var eq = part.IndexOf('=');
+            var key = eq < 0 ? part : part.Substring(0, eq);
+            var val = eq < 0 ? "" : Uri.UnescapeDataString(part.Substring(eq + 1));
+
+            if (String.Equals(key, "x.realmagnet", StringComparison.OrdinalIgnoreCase))
+            {
+                realMagnet = val;
+            }
+            else if (String.Equals(key, "x.includeseasons", StringComparison.OrdinalIgnoreCase))
+            {
+                seasons = val;
+            }
+            else
+            {
+                kept.Add(part);
+            }
+        }
+
+        return (prefix + String.Join("&", kept), realMagnet, seasons);
+    }
+
+    private static String SeasonsToIncludeRegex(String seasons)
+    {
+        // "3" -> \bS03\b   "2,3,4" -> \bS(02|03|04)\b
+        var nums = seasons.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var formatted = new System.Collections.Generic.List<String>(nums.Length);
+        foreach (var n in nums)
+        {
+            if (Int32.TryParse(n, out var v) && v > 0 && v < 100)
+            {
+                formatted.Add($"{v:D2}");
+            }
+        }
+
+        if (formatted.Count == 0)
+        {
+            return "";
+        }
+
+        if (formatted.Count == 1)
+        {
+            return $"(?i)\\bS{formatted[0]}\\b";
+        }
+
+        return $"(?i)\\bS({String.Join("|", formatted)})\\b";
     }
 }
