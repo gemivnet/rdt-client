@@ -181,9 +181,14 @@ public class Torrents(
         return nzbNewTorrent;
     }
 
-    public virtual async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent)
+    public virtual async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent, String? realMagnet = null)
     {
-        var enriched = await enricher.EnrichMagnetLink(magnetLink);
+        // SeasonSplit: when realMagnet is supplied, hash is taken from the
+        // synthetic magnetLink (so siblings stay distinct in the local DB
+        // and qBit API), while the real magnet is what we ship to the
+        // debrid provider.
+        var debridMagnet = String.IsNullOrWhiteSpace(realMagnet) ? magnetLink : realMagnet;
+        var enriched = await enricher.EnrichMagnetLink(debridMagnet);
         MagnetLink magnet;
 
         try
@@ -195,6 +200,12 @@ public class Torrents(
             logger.LogError(ex, "{ex.Message}, trying to parse {magnetLink}", ex.Message, magnetLink);
 
             throw new($"{ex.Message}, trying to parse {magnetLink}");
+        }
+
+        if (!String.IsNullOrWhiteSpace(realMagnet))
+        {
+            logger.LogInformation("[SeasonSplit] Using real magnet for debrid (length={debridLen}), local synth hash from urls (length={synthLen})",
+                                  debridMagnet.Length, magnetLink.Length);
         }
 
         if (!String.IsNullOrWhiteSpace(Settings.Get.General.BannedTrackers))

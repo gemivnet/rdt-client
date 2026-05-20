@@ -372,7 +372,11 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
             {
                 if (url.StartsWith("magnet"))
                 {
-                    await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null);
+                    if (!String.IsNullOrWhiteSpace(request.RealMagnet) || !String.IsNullOrWhiteSpace(request.IncludeRegex))
+                    {
+                        Console.WriteLine($"[SeasonSplit] TorrentsAdd received: category={request.Category} realMagnet={(String.IsNullOrEmpty(request.RealMagnet) ? "(none)" : "set")} includeRegex='{request.IncludeRegex}'");
+                    }
+                    await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null, request.RealMagnet, request.IncludeRegex);
                 }
                 else if (url.StartsWith("http"))
                 {
@@ -715,6 +719,17 @@ public class QBTorrentsAddRequest
     public String? Urls { get; set; }
     public String? Category { get; set; }
     public Int32? Priority { get; set; }
+
+    // SeasonSplit extension: the underlying real magnet for the multi-season
+    // pack. When set, rdt-client uses this magnet to talk to the debrid
+    // provider, but stores the torrent locally under the (synthetic) hash
+    // parsed from `Urls`. Allows sibling season grabs of the same pack to
+    // appear as distinct qBit torrents while sharing one RD download.
+    public String? RealMagnet { get; set; }
+
+    // SeasonSplit extension: per-torrent IncludeRegex override. Sonarr fork
+    // sends a regex like `\bS03\b` so only that season's files materialise.
+    public String? IncludeRegex { get; set; }
 }
 
 public class QBTorrentsSetCategoryRequest
