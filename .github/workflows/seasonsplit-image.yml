@@ -16,6 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pin embedded version to latest upstream tag
+        run: |
+          UPSTREAM_VERSION=$(curl -fsSL https://api.github.com/repos/rogerfar/rdt-client/releases/latest | grep -oE '"tag_name":\s*"v[^"]+"' | head -1 | sed -E 's/.*"v([^"]+)".*/\1/')
+          if [ -z "$UPSTREAM_VERSION" ]; then UPSTREAM_VERSION="2.0.999"; fi
+          echo "Setting embedded version to $UPSTREAM_VERSION"
+          sed -i "s|<Version>.*</Version>|<Version>$UPSTREAM_VERSION</Version>|" server/RdtClient.Web/RdtClient.Web.csproj
+          sed -i "s|<AssemblyVersion>.*</AssemblyVersion>|<AssemblyVersion>$UPSTREAM_VERSION</AssemblyVersion>|" server/RdtClient.Web/RdtClient.Web.csproj
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
