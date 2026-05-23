@@ -200,7 +200,15 @@ public class Torrents(
             var (peeledClean, peeledReal, _) = ExtractSeasonSplitParams(effectiveRealMagnet);
             effectiveRealMagnet = !String.IsNullOrWhiteSpace(peeledReal) ? peeledReal : peeledClean;
         }
-        if (!String.IsNullOrWhiteSpace(embeddedSeasons) && String.IsNullOrWhiteSpace(torrent.IncludeRegex))
+        // Embedded x.includeseasons drives the per-season file filter. Apply it
+        // when there's no IncludeRegex yet OR when the only IncludeRegex is the
+        // global default — the magnet's explicit season is more specific than a
+        // catch-all default. An explicit per-torrent override (which differs from
+        // the default) still wins.
+        var defaultIncludeRegex = Settings.Get.Integrations.Default.IncludeRegex;
+        if (!String.IsNullOrWhiteSpace(embeddedSeasons) &&
+            (String.IsNullOrWhiteSpace(torrent.IncludeRegex) ||
+             String.Equals(torrent.IncludeRegex, defaultIncludeRegex, StringComparison.Ordinal)))
         {
             torrent.IncludeRegex = SeasonsToIncludeRegex(embeddedSeasons);
             logger.LogInformation("[SeasonSplit] Magnet-embedded seasons={seasons} -> IncludeRegex='{regex}'",
@@ -234,6 +242,23 @@ public class Torrents(
 
         if (!String.IsNullOrWhiteSpace(Settings.Get.General.BannedTrackers))
         {
+            // Check the trackers of the magnet actually sent to the debrid
+            // provider (the real pack magnet for season-split), not the synthetic
+            // one — otherwise the banned-tracker filter is bypassed for the real
+            // content. They usually share trackers, but don't assume it.
+            var trackerCheckUrls = magnet.AnnounceUrls;
+            if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
+            {
+                try
+                {
+                    trackerCheckUrls = MagnetLink.Parse(debridMagnet).AnnounceUrls;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "[SeasonSplit] Could not parse real magnet for banned-tracker check; using synthetic magnet trackers");
+                }
+            }
+
             var bannedTrackers = Settings.Get.General.BannedTrackers.Split(',');
 
             foreach (var bannedTracker in bannedTrackers)
@@ -245,9 +270,9 @@ public class Torrents(
                     continue;
                 }
 
-                if (magnet.AnnounceUrls != null)
+                if (trackerCheckUrls != null)
                 {
-                    var bannedUrls = magnet.AnnounceUrls.Where(m => m.Trim().ToLower().Contains(bannedTrackerCompare)).ToList();
+                    var bannedUrls = trackerCheckUrls.Where(m => m.Trim().ToLower().Contains(bannedTrackerCompare)).ToList();
 
                     if (bannedUrls.Count > 0)
                     {
@@ -1295,7 +1320,8 @@ public class Torrents(
         var values = new System.Collections.Generic.List<String>(nums.Length);
         foreach (var n in nums)
         {
-            if (Int32.TryParse(n, out var v) && v > 0 && v < 100)
+            // Season 0 is valid (specials, "S00E01"). Cap at < 100.
+            if (Int32.TryParse(n, out var v) && v >= 0 && v < 100)
             {
                 values.Add(v.ToString());
             }
@@ -1303,7 +1329,10 @@ public class Torrents(
 
         if (values.Count == 0)
         {
-            return "";
+            // No tokens at all -> no filter (""). Tokens that were all invalid /
+            // out-of-range -> a never-match pattern, so we DON'T silently fall
+            // back to "no filter" and download the entire pack.
+            return nums.Length == 0 ? "" : "(?!)";
         }
 
         var group = values.Count == 1 ? values[0] : $"(?:{String.Join("|", values)})";
