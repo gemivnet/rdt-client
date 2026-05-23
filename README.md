@@ -1,5 +1,12 @@
 # Real-Debrid Torrent & Usenet Client
 
+> ⚠️ **This is a fork.** It adds per-season file selection so it can serve as the
+> download client for the [gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)
+> season-split fork. See **[SEASON_SPLIT.md](./SEASON_SPLIT.md)** for what changed
+> and why. All other behaviour is unchanged upstream rdt-client (below).
+
+---
+
 This is a web interface to manage your torrents on Real-Debrid, AllDebrid, Premiumize, TorBox or DebridLink. It supports the following features:
 
 - Add new torrents through magnets or files
