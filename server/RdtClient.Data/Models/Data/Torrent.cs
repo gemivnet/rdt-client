@@ -52,6 +52,12 @@ public class Torrent
 
     public Provider? ClientKind { get; set; }
     public String? RdId { get; set; }
+
+    // SeasonSplit fork: when set (to the real pack infohash), this torrent is a
+    // per-season "sibling" — several local torrents (distinct synthetic Hash)
+    // map to ONE Real-Debrid torrent (one RdId). Gates the one-to-many handling:
+    // select all files on RD, then filter each sibling's season locally.
+    public String? SeasonSplitRealHash { get; set; }
     public String? RdName { get; set; }
     public Int64? RdSize { get; set; }
     public String? RdHost { get; set; }

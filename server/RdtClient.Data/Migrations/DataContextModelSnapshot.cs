@@ -400,6 +400,9 @@ namespace RdtClient.Data.Migrations
                     b.Property<int>("RetryCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SeasonSplitRealHash")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("TorrentRetryAttempts")
                         .HasColumnType("INTEGER");
 

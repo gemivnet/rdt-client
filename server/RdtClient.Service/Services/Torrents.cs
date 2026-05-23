@@ -238,6 +238,19 @@ public class Torrents(
         {
             logger.LogInformation("[SeasonSplit] Using real magnet for debrid (length={debridLen}), local synth hash from urls (length={synthLen})",
                                   debridMagnet.Length, cleanMagnet.Length);
+
+            // Stamp the real pack infohash so the one-to-many handling can find
+            // every per-season sibling that shares this Real-Debrid torrent
+            // (RD dedups by infohash, so all siblings collapse to one RdId).
+            // Several local torrents (distinct synthetic Hash) -> one real hash.
+            try
+            {
+                torrent.SeasonSplitRealHash = MagnetLink.Parse(debridMagnet).InfoHashes.V1OrV2.ToHex();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "[SeasonSplit] Could not parse real magnet for SeasonSplitRealHash; one-to-many sibling handling disabled for this torrent");
+            }
         }
 
         if (!String.IsNullOrWhiteSpace(Settings.Get.General.BannedTrackers))
@@ -720,10 +733,10 @@ public class Torrents(
 
             foreach (var rdTorrent in rdTorrents)
             {
-                torrentsByRdId.TryGetValue(rdTorrent.Id, out var torrent);
+                torrentsByRdId.TryGetValue(rdTorrent.Id, out var siblings);
 
                 // Auto import torrents only torrents that have their files selected
-                if (torrent == null && Settings.Get.Provider.AutoImport)
+                if ((siblings == null || siblings.Count == 0) && Settings.Get.Provider.AutoImport)
                 {
                     var newTorrent = new Torrent
                     {
@@ -750,15 +763,21 @@ public class Torrents(
                         continue;
                     }
 
-                    torrent = await torrentData.Add(rdTorrent.Id, rdTorrent.Hash, null, false, DownloadType.Torrent, Settings.Get.DownloadClient.Client, newTorrent);
-                    torrentsByRdId[rdTorrent.Id] = torrent;
+                    var torrent = await torrentData.Add(rdTorrent.Id, rdTorrent.Hash, null, false, DownloadType.Torrent, Settings.Get.DownloadClient.Client, newTorrent);
+                    torrentsByRdId[rdTorrent.Id] = [torrent];
                     torrents.Add(torrent);
 
                     await UpdateTorrentClientData(torrent, rdTorrent);
                 }
-                else if (torrent != null)
+                else if (siblings != null)
                 {
-                    await UpdateTorrentClientData(torrent, rdTorrent);
+                    // Fan the single RD torrent's state out to every local sibling.
+                    // Each carries its own IncludeRegex, so file selection /
+                    // download filtering downstream still scopes to its season.
+                    foreach (var torrent in siblings)
+                    {
+                        await UpdateTorrentClientData(torrent, rdTorrent);
+                    }
                 }
             }
 
@@ -1149,16 +1168,29 @@ public class Torrents(
         }
     }
 
-    private static Dictionary<String, Torrent> CreateTorrentLookupByRdId(IEnumerable<Torrent> torrents)
+    // One RdId can map to MANY local torrents: Real-Debrid dedups by infohash,
+    // so every per-season season-split "sibling" (distinct synthetic Hash, same
+    // real pack magnet) collapses onto a single RD torrent id. A plain
+    // last-writer-wins dictionary would silently drop all but one sibling and
+    // only that one season would ever download — hence the list-valued lookup.
+    private static Dictionary<String, List<Torrent>> CreateTorrentLookupByRdId(IEnumerable<Torrent> torrents)
     {
-        var lookup = new Dictionary<String, Torrent>(StringComparer.Ordinal);
+        var lookup = new Dictionary<String, List<Torrent>>(StringComparer.Ordinal);
 
         foreach (var torrent in torrents)
         {
-            if (!String.IsNullOrWhiteSpace(torrent.RdId))
+            if (String.IsNullOrWhiteSpace(torrent.RdId))
             {
-                lookup[torrent.RdId] = torrent;
+                continue;
             }
+
+            if (!lookup.TryGetValue(torrent.RdId, out var siblings))
+            {
+                siblings = [];
+                lookup[torrent.RdId] = siblings;
+            }
+
+            siblings.Add(torrent);
         }
 
         return lookup;
