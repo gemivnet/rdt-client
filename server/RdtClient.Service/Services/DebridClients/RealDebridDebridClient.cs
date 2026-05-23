@@ -174,14 +174,24 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
                 torrentClientTorrent = await GetInfo(torrent.RdId) ?? throw new($"Resource not found");
             }
 
-            if (!String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
+            // Season-split sibling: keep the synthetic per-season name set at
+            // add-time (e.g. "Show S10 …"). The RD torrent's filename is the
+            // whole pack ("Show S01-S19 …"); letting it overwrite RdName makes
+            // Sonarr see a multi-season pack — it mislabels the queue season and
+            // refuses to import ("Multi-season download, unable to import").
+            // Siblings share one RD torrent, so they'd all collapse to the pack
+            // name otherwise.
+            if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
             {
-                torrent.RdName = torrentClientTorrent.Filename;
-            }
+                if (!String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
+                {
+                    torrent.RdName = torrentClientTorrent.Filename;
+                }
 
-            if (!String.IsNullOrWhiteSpace(torrentClientTorrent.OriginalFilename))
-            {
-                torrent.RdName = torrentClientTorrent.OriginalFilename;
+                if (!String.IsNullOrWhiteSpace(torrentClientTorrent.OriginalFilename))
+                {
+                    torrent.RdName = torrentClientTorrent.OriginalFilename;
+                }
             }
 
             if (torrentClientTorrent.Bytes > 0)
