@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
 using RdtClient.Data.Models.Internal;
@@ -28,6 +29,8 @@ public static class TorrentDtoMapper
                                     Boolean includeFileOrMagnet)
     {
         var downloads = includeDownloads ? torrent.Downloads.Select(download => ToDto(download, getDownloadStats)).ToList() : [];
+
+        var (isSeasonSplit, seasonSplitFilesCount, seasonSplitSize) = ComputeSeasonSplit(torrent);
 
         return new()
         {
@@ -71,9 +74,48 @@ public static class TorrentDtoMapper
             StatusText = GetStatusText(torrent, getDownloadStats),
             FilesCount = torrent.Files.Count,
             DownloadsCount = torrent.Downloads.Count,
+            IsSeasonSplit = isSeasonSplit,
+            SeasonSplitFilesCount = seasonSplitFilesCount,
+            SeasonSplitSize = seasonSplitSize,
             Files = includeFiles ? torrent.Files : [],
             Downloads = downloads
         };
+    }
+
+    // For a season-split sibling, work out how much of the shared pack this
+    // torrent actually downloads: the files whose path matches its IncludeRegex.
+    // Returned so the UI can show "<this season> (<whole pack>)".
+    private static (Boolean IsSeasonSplit, Int32? FilesCount, Int64? Size) ComputeSeasonSplit(Torrent torrent)
+    {
+        if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) || String.IsNullOrWhiteSpace(torrent.IncludeRegex))
+        {
+            return (false, null, null);
+        }
+
+        try
+        {
+            var regex = new Regex(torrent.IncludeRegex, RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+
+            var count = 0;
+            Int64 size = 0;
+
+            foreach (var file in torrent.Files)
+            {
+                if (file.Path != null && regex.IsMatch(file.Path))
+                {
+                    count++;
+                    size += file.Bytes;
+                }
+            }
+
+            return (true, count, size);
+        }
+        catch
+        {
+            // Bad/timed-out regex: still flag it as a season split so the UI can
+            // label it, but leave the filtered numbers null (fall back to raw).
+            return (true, null, null);
+        }
     }
 
     private static DownloadDto ToDto(Download download, Func<Guid, (Int64 Speed, Int64 BytesTotal, Int64 BytesDone)> getDownloadStats)

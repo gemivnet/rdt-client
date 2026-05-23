@@ -65,13 +65,23 @@
               {{ torrent.rdSeeders }}
             </td>
             <td>
-              {{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }}
+              @if (torrent.isSeasonSplit && torrent.seasonSplitFilesCount != null) {
+                {{ torrent.seasonSplitFilesCount | number }}
+                <span class="has-text-grey">({{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }})</span>
+              } @else {
+                {{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }}
+              }
             </td>
             <td>
               {{ (torrent.downloadsCount ?? torrent.downloads?.length ?? 0) | number }}
             </td>
             <td>
-              {{ torrent.rdSize | filesize }}
+              @if (torrent.isSeasonSplit && torrent.seasonSplitSize != null) {
+                {{ torrent.seasonSplitSize | filesize }}
+                <span class="has-text-grey">({{ torrent.rdSize | filesize }})</span>
+              } @else {
+                {{ torrent.rdSize | filesize }}
+              }
             </td>
             <td>
               {{ torrent.added | date: "medium" }}
@@ -104,11 +114,21 @@
             </div>
             <div class="mobile-card-details">
               <span class="mobile-card-detail"
-                ><span class="detail-label">Size</span> {{ torrent.rdSize | filesize }}</span
+                ><span class="detail-label">Size</span>
+                @if (torrent.isSeasonSplit && torrent.seasonSplitSize != null) {
+                  {{ torrent.seasonSplitSize | filesize }} <span class="has-text-grey">({{ torrent.rdSize | filesize }})</span>
+                } @else {
+                  {{ torrent.rdSize | filesize }}
+                }</span
               >
               <span class="mobile-card-detail"><span class="detail-label">Seeders</span> {{ torrent.rdSeeders }}</span>
               <span class="mobile-card-detail"
-                ><span class="detail-label">Files</span> {{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }}</span
+                ><span class="detail-label">Files</span>
+                @if (torrent.isSeasonSplit && torrent.seasonSplitFilesCount != null) {
+                  {{ torrent.seasonSplitFilesCount | number }} <span class="has-text-grey">({{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }})</span>
+                } @else {
+                  {{ (torrent.filesCount ?? torrent.files?.length ?? 0) | number }}
+                }</span
               >
               <span class="mobile-card-detail"
                 ><span class="detail-label">Downloads</span> {{ (torrent.downloadsCount ?? torrent.downloads?.length ?? 0) | number }}</span

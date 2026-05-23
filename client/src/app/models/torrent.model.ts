@@ -48,6 +48,12 @@ export class Torrent {
   public filesCount?: number;
   public downloadsCount?: number;
 
+  // Season-split: filtered (this-season) counts; the raw pack values stay in
+  // filesCount / rdSize. The table shows "synthetic (raw)" when isSeasonSplit.
+  public isSeasonSplit?: boolean;
+  public seasonSplitFilesCount?: number;
+  public seasonSplitSize?: number;
+
   public files?: TorrentFile[];
   public downloads?: Download[];
 }

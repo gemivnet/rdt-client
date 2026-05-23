@@ -45,6 +45,14 @@ public class TorrentDto
     public String StatusText { get; set; } = null!;
     public Int32 FilesCount { get; set; }
     public Int32 DownloadsCount { get; set; }
+
+    // Season-split sibling: this torrent shares one debrid torrent with other
+    // per-season siblings, but only downloads the files matching its season
+    // (IncludeRegex). The UI shows these "synthetic" numbers primary with the
+    // raw pack FilesCount/RdSize in parentheses. Null when not a season split.
+    public Boolean IsSeasonSplit { get; set; }
+    public Int32? SeasonSplitFilesCount { get; set; }
+    public Int64? SeasonSplitSize { get; set; }
     public IList<DebridClientFile> Files { get; set; } = [];
     public IList<DownloadDto> Downloads { get; set; } = [];
 }
