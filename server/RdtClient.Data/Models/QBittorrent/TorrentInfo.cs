@@ -109,6 +109,14 @@ public class TorrentInfo
     [JsonPropertyName("state")]
     public String? State { get; set; }
 
+    // SeasonSplit fork extension (not part of the real qBittorrent API): the
+    // human-readable error detail (e.g. "Could not add to provider: Infringing
+    // file"). Real qBit collapses the error into the "error" state with no
+    // detail, so the gemivnet/Sonarr fork reads this field to drive its
+    // permanent-error auto-blocklist. Standard qBit clients ignore it.
+    [JsonPropertyName("rdt_error")]
+    public String? RdtError { get; set; }
+
     [JsonPropertyName("super_seeding")]
     public Boolean SuperSeeding { get; set; }
 

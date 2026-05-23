@@ -322,6 +322,10 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
             if (!String.IsNullOrWhiteSpace(torrent.Error))
             {
                 result.State = "error";
+
+                // Surface the real error detail so the Sonarr fork can classify
+                // permanent failures (infringing/unavailable) and blocklist them.
+                result.RdtError = torrent.Error;
             }
             else if (torrent.Completed.HasValue)
             {
