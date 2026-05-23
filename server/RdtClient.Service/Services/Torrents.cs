@@ -628,15 +628,39 @@ public class Torrents(
 
         if (deleteRdTorrent && torrent.RdId != null)
         {
-            Log($"Deleting RealDebrid Torrent", torrent);
+            // Season-split siblings share ONE Real-Debrid torrent (RD dedups by
+            // infohash → one RdId for many local rows). Deleting the RD torrent
+            // when one sibling goes would yank the files out from under every
+            // other season still downloading. Ref-count by RdId: only delete the
+            // RD torrent once the last sibling is being removed.
+            var lastSibling = true;
 
-            try
+            if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
             {
-                await DebridClient.Delete(torrent);
+                var remaining = (await torrentData.Get())
+                    .Count(t => t.TorrentId != torrentId &&
+                                String.Equals(t.RdId, torrent.RdId, StringComparison.Ordinal));
+
+                lastSibling = remaining == 0;
+
+                if (!lastSibling)
+                {
+                    Log($"[SeasonSplit] Keeping RealDebrid torrent — {remaining} sibling(s) still share RdId {torrent.RdId}", torrent);
+                }
             }
-            catch
+
+            if (lastSibling)
             {
-                // ignored
+                Log($"Deleting RealDebrid Torrent", torrent);
+
+                try
+                {
+                    await DebridClient.Delete(torrent);
+                }
+                catch
+                {
+                    // ignored
+                }
             }
         }
 
@@ -867,6 +891,24 @@ public class Torrents(
                     var bytes = Convert.FromBase64String(torrent.FileOrMagnet!);
 
                     newTorrent = await AddFileToDebridQueue(bytes, torrent);
+                }
+                else if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
+                {
+                    // Season-split sibling: FileOrMagnet holds the *real* pack
+                    // magnet while Hash is the synthetic per-season infohash. A
+                    // plain re-add would resolve to the real pack hash and the
+                    // torrent would lose its season identity (and collide with
+                    // its siblings). Rebuild a synthetic magnet carrying the
+                    // synthetic hash and pass the real magnet via realMagnet, so
+                    // the add path reproduces the synthetic local hash, ships the
+                    // real magnet to the provider, and keeps this sibling's
+                    // IncludeRegex / SeasonSplitRealHash intact.
+                    var dn = !String.IsNullOrWhiteSpace(torrent.RdName) ? Uri.EscapeDataString(torrent.RdName) : torrent.Hash;
+                    var syntheticMagnet = $"magnet:?xt=urn:btih:{torrent.Hash}&dn={dn}";
+
+                    logger.LogInformation("[SeasonSplit] Retrying sibling with synthetic hash {hash} (real pack {realHash})", torrent.Hash, torrent.SeasonSplitRealHash);
+
+                    newTorrent = await AddMagnetToDebridQueue(syntheticMagnet, torrent, torrent.FileOrMagnet!);
                 }
                 else
                 {
