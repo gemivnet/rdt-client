@@ -366,6 +366,16 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
 
         var urls = request.Urls.Split("\n");
 
+        // SeasonSplit: RealMagnet/IncludeRegex are single-torrent overrides. The
+        // qBit API allows batching multiple newline-separated URLs in one add,
+        // but Sonarr sends one magnet per request, so applying the same override
+        // to every URL in a batch would be wrong. Guard against silent misuse.
+        if ((!String.IsNullOrWhiteSpace(request.RealMagnet) || !String.IsNullOrWhiteSpace(request.IncludeRegex)) &&
+            urls.Count(u => !String.IsNullOrWhiteSpace(u)) > 1)
+        {
+            return BadRequest("RealMagnet/IncludeRegex overrides require a single magnet URL per request.");
+        }
+
         foreach (var url in urls)
         {
             try
@@ -374,7 +384,8 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
                 {
                     if (!String.IsNullOrWhiteSpace(request.RealMagnet) || !String.IsNullOrWhiteSpace(request.IncludeRegex))
                     {
-                        Console.WriteLine($"[SeasonSplit] TorrentsAdd received: category={request.Category} realMagnet={(String.IsNullOrEmpty(request.RealMagnet) ? "(none)" : "set")} includeRegex='{request.IncludeRegex}'");
+                        logger.LogInformation("[SeasonSplit] TorrentsAdd received: category={category} realMagnet={realMagnet} includeRegex='{includeRegex}'",
+                                              request.Category, String.IsNullOrEmpty(request.RealMagnet) ? "(none)" : "set", request.IncludeRegex);
                     }
                     await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null, request.RealMagnet, request.IncludeRegex);
                 }

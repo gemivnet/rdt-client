@@ -190,6 +190,16 @@ public class Torrents(
         var (cleanMagnet, embeddedRealMagnet, embeddedSeasons) = ExtractSeasonSplitParams(magnetLink);
 
         var effectiveRealMagnet = !String.IsNullOrWhiteSpace(realMagnet) ? realMagnet : embeddedRealMagnet;
+
+        // Defensive: older Sonarr-fork builds shipped the *synthetic* magnet in
+        // the realMagnet form param (it carries a synthetic xt plus a nested
+        // x.realmagnet=). Peel any wrapper off so the debrid provider always
+        // receives a resolvable magnet rather than a synthetic infohash.
+        if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
+        {
+            var (peeledClean, peeledReal, _) = ExtractSeasonSplitParams(effectiveRealMagnet);
+            effectiveRealMagnet = !String.IsNullOrWhiteSpace(peeledReal) ? peeledReal : peeledClean;
+        }
         if (!String.IsNullOrWhiteSpace(embeddedSeasons) && String.IsNullOrWhiteSpace(torrent.IncludeRegex))
         {
             torrent.IncludeRegex = SeasonsToIncludeRegex(embeddedSeasons);
@@ -1274,27 +1284,30 @@ public class Torrents(
 
     private static String SeasonsToIncludeRegex(String seasons)
     {
-        // "3" -> \bS03\b   "2,3,4" -> \bS(02|03|04)\b
+        // Builds a per-file IncludeRegex matching only the given season(s).
+        // Matches the "S03E05" episode form (also S3E5 / S03.E05) and the
+        // "Season 03" folder form, while rejecting range folders like
+        // "S01-S05" and adjacent seasons (S30, S13). A bare "\bS03\b" fails on
+        // the common contiguous "S03E05" naming (no word boundary before "E"),
+        // so we anchor on the episode marker instead. Kept in sync with the
+        // Sonarr fork's BuildSeasonIncludeRegex.
         var nums = seasons.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var formatted = new System.Collections.Generic.List<String>(nums.Length);
+        var values = new System.Collections.Generic.List<String>(nums.Length);
         foreach (var n in nums)
         {
             if (Int32.TryParse(n, out var v) && v > 0 && v < 100)
             {
-                formatted.Add($"{v:D2}");
+                values.Add(v.ToString());
             }
         }
 
-        if (formatted.Count == 0)
+        if (values.Count == 0)
         {
             return "";
         }
 
-        if (formatted.Count == 1)
-        {
-            return $"(?i)\\bS{formatted[0]}\\b";
-        }
+        var group = values.Count == 1 ? values[0] : $"(?:{String.Join("|", values)})";
 
-        return $"(?i)\\bS({String.Join("|", formatted)})\\b";
+        return $"(?i)(?<![A-Za-z0-9])(?:S0*{group}(?=[ ._-]?E\\d)|season[ ._-]*0*{group}(?![0-9]))";
     }
 }
