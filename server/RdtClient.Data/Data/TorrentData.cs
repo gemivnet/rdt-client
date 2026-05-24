@@ -96,7 +96,13 @@ public class TorrentData(DataContext dataContext, ILogger<TorrentData>? logger =
             DeleteOnError = torrent.DeleteOnError,
             Lifetime = torrent.Lifetime,
             RdStatus = torrent.RdStatus,
-            RdName = torrent.RdName
+            RdName = torrent.RdName,
+
+            // SeasonSplit: must be carried onto the persisted entity. Everything
+            // downstream gates on it (select-all on RD, per-sibling file filter,
+            // not letting the RD pack name clobber RdName, the UI's raw/synthetic
+            // display). Dropping it here silently disabled all of that.
+            SeasonSplitRealHash = torrent.SeasonSplitRealHash
         };
 
         await dataContext.Torrents.AddAsync(newTorrent);
