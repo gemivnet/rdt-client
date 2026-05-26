@@ -138,7 +138,30 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
             return 0;
         }
 
-        await GetClient().Torrents.SelectFilesAsync(torrent.RdId!, [.. fileIds]);
+        // Season-split siblings share ONE RD torrent. The first sibling selects
+        // its files (all of them); every other sibling then finds the RD torrent
+        // already past file selection. Re-calling selectFiles on it errors, which
+        // used to leave those siblings stuck at "waiting for file selection"
+        // forever (FilesSelected never got set, so downloads were never created).
+        // Skip the call once the shared torrent has moved on, and tolerate an
+        // "already selected" error if we raced — either way the files are selected
+        // and the sibling can advance.
+        if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) &&
+            torrent.RdStatus != TorrentStatus.WaitingForFileSelection)
+        {
+            Log("[SeasonSplit] Shared RD torrent already past file selection; not re-selecting", torrent);
+
+            return fileIds.Length;
+        }
+
+        try
+        {
+            await GetClient().Torrents.SelectFilesAsync(torrent.RdId!, [.. fileIds]);
+        }
+        catch (Exception ex) when (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
+        {
+            Log($"[SeasonSplit] selectFiles errored on shared RD torrent (likely already selected by a sibling), treating as done: {ex.Message}", torrent);
+        }
 
         return fileIds.Length;
     }
