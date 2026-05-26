@@ -317,6 +317,17 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
 
             if (selectedFiles.Count != downloadLinks.Count)
             {
+                // Real-Debrid returns one link per servable file and silently OMITS
+                // links for infringing-filtered files - so a persistent shortfall
+                // means the missing files are blocked. We can't positionally map a
+                // partial link set back to the selected files to season-filter it,
+                // so don't hang forever (this used to stick at "waiting for download
+                // links" indefinitely). Wait briefly for stragglers, then fail.
+                if (torrent.RdEnded.HasValue && (DateTime.UtcNow - torrent.RdEnded.Value.ToUniversalTime()).TotalSeconds > 120)
+                {
+                    throw new($"Real-Debrid returned only {downloadLinks.Count} of {selectedFiles.Count} download links; the rest are unavailable (likely infringing-filtered).");
+                }
+
                 Log($"[SeasonSplit] Selected files ({selectedFiles.Count}) != links ({downloadLinks.Count}); waiting for all links before season-filtering", torrent);
 
                 return null;

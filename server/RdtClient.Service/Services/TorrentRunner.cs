@@ -721,7 +721,19 @@ public class TorrentRunner(
 
                         if (torrent.HostDownloadAction == TorrentHostDownloadAction.DownloadAll)
                         {
-                            await torrents.CreateDownloads(torrent.TorrentId);
+                            try
+                            {
+                                await torrents.CreateDownloads(torrent.TorrentId);
+                            }
+                            catch (Exception ex)
+                            {
+                                // e.g. a permanent link shortfall (infringing-filtered
+                                // files). Fail the torrent instead of retrying the
+                                // link fetch forever.
+                                logger.LogError(ex, "Could not create downloads for {torrentId}", torrent.TorrentId);
+
+                                await torrents.UpdateComplete(torrent.TorrentId, ex.Message, DateTimeOffset.UtcNow, false);
+                            }
                         }
                     }
                 }
