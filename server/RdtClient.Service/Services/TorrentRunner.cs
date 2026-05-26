@@ -544,7 +544,7 @@ public class TorrentRunner(
                         {
                             Log("Real-Debrid flagged this torrent as infringing; failing it instead of retrying every file", torrent);
 
-                            await torrents.UpdateComplete(torrent.TorrentId, $"Infringing file: {ex.Message}", DateTimeOffset.UtcNow, false);
+                            await torrents.UpdateComplete(torrent.TorrentId, $"Real-Debrid refused this file: {ex.Message}", DateTimeOffset.UtcNow, false);
                         }
 
                         return;
