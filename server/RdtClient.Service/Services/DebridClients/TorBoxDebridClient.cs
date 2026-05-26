@@ -316,7 +316,11 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
         }
         else
         {
-            var torrentId = await HandleErrors(() => GetClient().Torrents.GetHashInfoAsync(torrent.Hash, true));
+            // Season-split: the sibling is tracked under a synthetic Hash, but
+            // TorBox knows the torrent by its REAL infohash. Look it up by the
+            // real hash when set, otherwise the lookup misses and the grab sticks.
+            var lookupHash = !String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) ? torrent.SeasonSplitRealHash : torrent.Hash;
+            var torrentId = await HandleErrors(() => GetClient().Torrents.GetHashInfoAsync(lookupHash, true));
             id = torrentId?.Id;
         }
 
