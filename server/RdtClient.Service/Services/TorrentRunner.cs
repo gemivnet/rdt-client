@@ -533,6 +533,20 @@ public class TorrentRunner(
                         download.Error = ex.Message;
                         download.Completed = DateTimeOffset.UtcNow;
 
+                        // Real-Debrid error 35 ("Infringing file") is a permanent,
+                        // torrent-wide block - every file link will be refused. Without
+                        // this, a big pack means we discover the block once per file
+                        // (1000+ unrestrict calls, one per tick) before giving up, and
+                        // the client never reports a clean failure. Fail the whole
+                        // torrent now so the remaining queued files are abandoned and
+                        // Sonarr sees a single failed download it can blocklist.
+                        if (ex is RDNET.RealDebridException { ErrorCode: 35 })
+                        {
+                            Log("Real-Debrid flagged this torrent as infringing; failing it instead of retrying every file", torrent);
+
+                            await torrents.UpdateComplete(torrent.TorrentId, $"Infringing file: {ex.Message}", DateTimeOffset.UtcNow, false);
+                        }
+
                         return;
                     }
 
