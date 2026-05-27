@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.Authorization;
+﻿using System.Net.Http;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.QBittorrent;
@@ -24,6 +26,85 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     {
         // Returning 20 nudges older qB clients to use /api/v2 endpoints.
         return Content("20", "text/plain");
+    }
+
+    // SeasonSplit fork (not part of the qBit spec): return a torrent's file list
+    // WITHOUT adding a download, so the Sonarr Add Magnet preview never creates a
+    // phantom download, hammers the provider rate limit, or stalls 45s. TorBox
+    // only (uses /torrents/torrentinfo, which fetches metadata from the network
+    // and caches it - re-lookups are instant). Other providers return 501 so
+    // Sonarr falls back to its add-and-poll probe.
+    [AllowAnonymous]
+    [Route("torrents/ssmetadata")]
+    [HttpPost]
+    public async Task<ActionResult> SeasonSplitMetadata([FromForm] String? magnet)
+    {
+        if (Settings.Get.Provider.Provider != Provider.TorBox)
+        {
+            return StatusCode(501, "ssmetadata is only supported on TorBox");
+        }
+
+        var apiKey = Settings.Get.Provider.ApiKey;
+
+        if (String.IsNullOrWhiteSpace(magnet) || String.IsNullOrWhiteSpace(apiKey))
+        {
+            return BadRequest("magnet and a configured TorBox API key are required");
+        }
+
+        var http = httpClientFactory.CreateClient();
+        http.Timeout = TimeSpan.FromSeconds(60);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.torbox.app/v1/api/torrents/torrentinfo");
+        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {apiKey}");
+        req.Content = new FormUrlEncodedContent(new Dictionary<String, String>
+        {
+            ["magnet"] = magnet,
+            ["use_cache_lookup"] = "true",
+        });
+
+        String body;
+
+        try
+        {
+            using var resp = await http.SendAsync(req);
+            body = await resp.Content.ReadAsStringAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[SeasonSplit] torrentinfo request failed");
+
+            return StatusCode(504, "TorBox metadata request timed out");
+        }
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty("success", out var ok) || !ok.GetBoolean() ||
+            !root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+        {
+            var detail = root.TryGetProperty("detail", out var d) ? d.GetString() : "TorBox could not return metadata";
+
+            return StatusCode(502, detail);
+        }
+
+        var result = new SsMetadataResult
+        {
+            Name = data.TryGetProperty("name", out var nm) ? nm.GetString() : null,
+        };
+
+        if (data.TryGetProperty("files", out var farr) && farr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var f in farr.EnumerateArray())
+            {
+                result.Files.Add(new SsMetadataFile
+                {
+                    Name = f.TryGetProperty("name", out var n) ? n.GetString() : null,
+                    Size = f.TryGetProperty("size", out var s) && s.TryGetInt64(out var sv) ? sv : 0,
+                });
+            }
+        }
+
+        return new JsonResult(result);
     }
 
     [AllowAnonymous]
@@ -762,4 +843,16 @@ public class QBTorrentsRemoveCategoryRequest
 public class QBTorrentsHashesRequest
 {
     public String? Hashes { get; set; }
+}
+
+public class SsMetadataFile
+{
+    public String? Name { get; set; }
+    public Int64 Size { get; set; }
+}
+
+public class SsMetadataResult
+{
+    public String? Name { get; set; }
+    public List<SsMetadataFile> Files { get; set; } = [];
 }
