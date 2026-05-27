@@ -122,6 +122,29 @@ public class DownloadClient(Download download, Torrent torrent, String destinati
         await Downloader.Cancel();
     }
 
+    // Fail a download with a reason (e.g. detected stall). Unlike Cancel(), this
+    // keeps an Error set so the TorrentRunner routes it through the normal
+    // retry / fail-over path instead of treating it as a clean cancel.
+    public async Task MarkFailed(String reason)
+    {
+        Error = reason;
+        Finished = true;
+
+        if (Downloader == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await Downloader.Cancel();
+        }
+        catch
+        {
+            // best-effort: the download is being abandoned anyway
+        }
+    }
+
     public async Task Pause()
     {
         if (Downloader == null)

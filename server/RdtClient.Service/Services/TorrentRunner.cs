@@ -23,6 +23,16 @@ public class TorrentRunner(
     public static readonly ConcurrentDictionary<Guid, UnpackClient> ActiveUnpackClients = new();
     private DateTimeOffset? _lastNextAllowedAt;
 
+    // Stall detection: a download that advances less than DownloadStallMinProgressBytes
+    // within DownloadStallTimeout is treated as stuck - a provider rate-limit (429) or
+    // a wedged/low-seed connection can leave it trickling at a few bytes/sec, never
+    // finishing while holding a download slot the rest of the queue waits on. Failing
+    // it routes through the existing retry path so it retries and then fails over
+    // (the *arr app grabs a cached/better-seeded release instead).
+    private static readonly TimeSpan DownloadStallTimeout = TimeSpan.FromMinutes(10);
+    private const Int64 DownloadStallMinProgressBytes = 1024 * 1024; // 1 MiB / window
+    private static readonly ConcurrentDictionary<Guid, (Int64 BytesDone, DateTimeOffset Since)> DownloadProgressTracker = new();
+
     public static Boolean IsPausedForLowDiskSpace { get; set; }
 
     public static (Int64 Speed, Int64 BytesTotal, Int64 BytesDone) GetStats(Guid downloadId)
@@ -183,6 +193,50 @@ public class TorrentRunner(
             }
         }
 
+        // Stall detection: fail downloads that make effectively no progress for too
+        // long. Speed/BytesDone are fresh here (Aria2/DownloadStation were just
+        // refreshed above; Bezzad updates them live). A download advancing less than
+        // DownloadStallMinProgressBytes over DownloadStallTimeout is wedged - failing
+        // it via MarkFailed sets an Error so the retry path below picks it up.
+        foreach (var (downloadId, downloadClient) in ActiveDownloadClients)
+        {
+            if (downloadClient.Finished)
+            {
+                continue;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var bytesDone = downloadClient.BytesDone;
+
+            if (!DownloadProgressTracker.TryGetValue(downloadId, out var last) ||
+                bytesDone - last.BytesDone >= DownloadStallMinProgressBytes)
+            {
+                // First time seen, or meaningful progress since last window - reset.
+                DownloadProgressTracker[downloadId] = (bytesDone, now);
+            }
+            else if (now - last.Since > DownloadStallTimeout)
+            {
+                var stalledDownload = await downloads.GetById(downloadId);
+
+                LogError($"Download stalled: advanced only {bytesDone - last.BytesDone} bytes in {DownloadStallTimeout.TotalMinutes:n0}m ({bytesDone}/{downloadClient.BytesTotal} bytes). Failing it so it can retry / fail over.",
+                         stalledDownload,
+                         stalledDownload?.Torrent);
+
+                await downloadClient.MarkFailed($"Download stalled - no meaningful progress for {DownloadStallTimeout.TotalMinutes:n0} minutes (provider rate-limiting, or the torrent is uncached / low-seed)");
+
+                DownloadProgressTracker.TryRemove(downloadId, out _);
+            }
+        }
+
+        // Drop tracker entries for downloads that are no longer active.
+        foreach (var trackedId in DownloadProgressTracker.Keys.ToList())
+        {
+            if (!ActiveDownloadClients.ContainsKey(trackedId))
+            {
+                DownloadProgressTracker.TryRemove(trackedId, out _);
+            }
+        }
+
         // Check if any torrents are finished downloading to the host, remove them from the active download list.
         var completedActiveDownloads = ActiveDownloadClients.Where(m => m.Value.Finished).ToList();
 
@@ -205,10 +259,28 @@ public class TorrentRunner(
 
                 Log("Processing download", download, download.Torrent);
 
-                if (!String.IsNullOrWhiteSpace(downloadClient.Error))
+                var error = downloadClient.Error;
+
+                // Truncation guard: a provider rate-limit (429) or a dropped
+                // connection can end the HTTP stream early while the downloader
+                // still reports "complete". Importing the partial file leaves a
+                // stub the *arr apps reject ("unable to determine if sample"), and
+                // rdt-client would otherwise mark the torrent done. If we received
+                // materially fewer bytes than the file's real size, treat it as an
+                // error so it retries instead of being marked finished. (Skip
+                // Symlink - it doesn't transfer bytes locally.)
+                if (String.IsNullOrWhiteSpace(error) &&
+                    downloadClient.Type != Data.Enums.DownloadClient.Symlink &&
+                    downloadClient.BytesTotal > 0 &&
+                    downloadClient.BytesDone < (Int64)(downloadClient.BytesTotal * 0.999))
+                {
+                    error = $"Truncated download: received {downloadClient.BytesDone} of {downloadClient.BytesTotal} bytes (likely a provider rate-limit or dropped connection)";
+                }
+
+                if (!String.IsNullOrWhiteSpace(error))
                 {
                     // Retry the download if an error is encountered.
-                    LogError($"Download reported an error: {downloadClient.Error}", download, download.Torrent);
+                    LogError($"Download reported an error: {error}", download, download.Torrent);
 
                     Log($"Download retry count {download.RetryCount}/{download.Torrent!.DownloadRetryAttempts}, torrent retry count {download.Torrent.RetryCount}/{download.Torrent.TorrentRetryAttempts}",
                         download,
@@ -225,7 +297,7 @@ public class TorrentRunner(
                     {
                         Log($"Not retrying download", download, download.Torrent);
 
-                        await downloads.UpdateError(downloadId, downloadClient.Error);
+                        await downloads.UpdateError(downloadId, error);
                         await downloads.UpdateCompleted(downloadId, DateTimeOffset.UtcNow);
                     }
                 }
