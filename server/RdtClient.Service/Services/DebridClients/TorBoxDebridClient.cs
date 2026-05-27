@@ -317,9 +317,19 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
         else
         {
             // Season-split: the sibling is tracked under a synthetic Hash, but
-            // TorBox knows the torrent by its REAL infohash. Look it up by the
-            // real hash when set, otherwise the lookup misses and the grab sticks.
-            var lookupHash = !String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) ? torrent.SeasonSplitRealHash : torrent.Hash;
+            // TorBox knows the torrent by its REAL infohash. RdId IS that real
+            // hash (TorBox returns it from the add and GetInfo uses it), so use it
+            // here too. Lowercase it because TorBox's hash lookup is
+            // case-sensitive and SeasonSplitRealHash/Hash can be upper-cased -
+            // an upper-case hash misses, leaving the grab stuck at "waiting for
+            // download links".
+            var lookupHash = (!String.IsNullOrWhiteSpace(torrent.RdId) ? torrent.RdId : torrent.Hash)?.ToLowerInvariant();
+
+            if (String.IsNullOrWhiteSpace(lookupHash))
+            {
+                return null;
+            }
+
             var torrentId = await HandleErrors(() => GetClient().Torrents.GetHashInfoAsync(lookupHash, true));
             id = torrentId?.Id;
         }
