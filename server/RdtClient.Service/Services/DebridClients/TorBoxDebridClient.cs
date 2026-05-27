@@ -218,14 +218,23 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
 
             var rdTorrent = torrentClientTorrent ?? await GetInfo(torrent.RdId, torrent.Type) ?? throw new($"Resource not found");
 
-            if (!String.IsNullOrWhiteSpace(rdTorrent.Filename))
+            // Season-split sibling: keep the synthetic per-season name set at
+            // add-time ("Survivor Collection S02"). TorBox reports the whole
+            // pack's name ("...S01-S21"); letting it overwrite RdName means Sonarr
+            // can't map the download back to a season's episodes, so nothing
+            // imports (the queue shows it with no episodes / Unknown quality). The
+            // Real-Debrid client guards the same way.
+            if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
             {
-                torrent.RdName = rdTorrent.Filename;
-            }
+                if (!String.IsNullOrWhiteSpace(rdTorrent.Filename))
+                {
+                    torrent.RdName = rdTorrent.Filename;
+                }
 
-            if (!String.IsNullOrWhiteSpace(rdTorrent.OriginalFilename))
-            {
-                torrent.RdName = rdTorrent.OriginalFilename;
+                if (!String.IsNullOrWhiteSpace(rdTorrent.OriginalFilename))
+                {
+                    torrent.RdName = rdTorrent.OriginalFilename;
+                }
             }
 
             if (rdTorrent.Bytes > 0)
