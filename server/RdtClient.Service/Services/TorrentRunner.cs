@@ -33,6 +33,12 @@ public class TorrentRunner(
     private const Int64 DownloadStallMinProgressBytes = 1024 * 1024; // 1 MiB / window
     private static readonly ConcurrentDictionary<Guid, (Int64 BytesDone, DateTimeOffset Since)> DownloadProgressTracker = new();
 
+    // Truncation guard: a "completed" video file smaller than this is a stub left
+    // by a provider 429 / dropped connection (the real episodes are far larger).
+    // Used when the total size was never reported, so the byte-ratio check can't run.
+    private const Int64 TruncatedVideoFloorBytes = 1024 * 1024; // 1 MiB
+    private static readonly String[] VideoExtensions = [".mkv", ".mp4", ".avi", ".ts", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".flv", ".webm"];
+
     public static Boolean IsPausedForLowDiskSpace { get; set; }
 
     public static (Int64 Speed, Int64 BytesTotal, Int64 BytesDone) GetStats(Guid downloadId)
@@ -261,20 +267,36 @@ public class TorrentRunner(
 
                 var error = downloadClient.Error;
 
+                // Always record the byte counts so a truncation is diagnosable after
+                // the fact (the torrent may be cleaned up before we can inspect it).
+                Log($"Download completed: {downloadClient.BytesDone}/{downloadClient.BytesTotal} bytes, type {downloadClient.Type}, file '{download.FileName ?? download.Path}', error '{downloadClient.Error}'",
+                    download,
+                    download.Torrent);
+
                 // Truncation guard: a provider rate-limit (429) or a dropped
                 // connection can end the HTTP stream early while the downloader
-                // still reports "complete". Importing the partial file leaves a
-                // stub the *arr apps reject ("unable to determine if sample"), and
-                // rdt-client would otherwise mark the torrent done. If we received
-                // materially fewer bytes than the file's real size, treat it as an
-                // error so it retries instead of being marked finished. (Skip
-                // Symlink - it doesn't transfer bytes locally.)
-                if (String.IsNullOrWhiteSpace(error) &&
-                    downloadClient.Type != Data.Enums.DownloadClient.Symlink &&
-                    downloadClient.BytesTotal > 0 &&
-                    downloadClient.BytesDone < (Int64)(downloadClient.BytesTotal * 0.999))
+                // still reports "complete". Importing the partial file leaves a stub
+                // the *arr apps reject ("unable to determine if sample"). Catch it two
+                // ways so we don't depend on the total size being reported:
+                //   1. byte-ratio - got materially fewer bytes than the known total;
+                //   2. video-floor - the total was never captured (stream died before
+                //      Content-Length was seen) but a "complete" video file this tiny
+                //      is a stub.
+                // Either way set an error so it retries / fails over instead of being
+                // marked finished. (Skip Symlink - it transfers no local bytes.)
+                if (String.IsNullOrWhiteSpace(error) && downloadClient.Type != Data.Enums.DownloadClient.Symlink)
                 {
-                    error = $"Truncated download: received {downloadClient.BytesDone} of {downloadClient.BytesTotal} bytes (likely a provider rate-limit or dropped connection)";
+                    var fileName = download.FileName ?? download.Path ?? String.Empty;
+                    var isVideo = VideoExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+
+                    if (downloadClient.BytesTotal > 0 && downloadClient.BytesDone < (Int64)(downloadClient.BytesTotal * 0.999))
+                    {
+                        error = $"Truncated download: received {downloadClient.BytesDone} of {downloadClient.BytesTotal} bytes (provider rate-limit or dropped connection)";
+                    }
+                    else if (isVideo && downloadClient.BytesDone < TruncatedVideoFloorBytes)
+                    {
+                        error = $"Truncated download: video file completed at only {downloadClient.BytesDone} bytes (provider rate-limit or dropped connection; total size was not reported)";
+                    }
                 }
 
                 if (!String.IsNullOrWhiteSpace(error))
