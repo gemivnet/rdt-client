@@ -628,24 +628,31 @@ public class Torrents(
 
         if (deleteRdTorrent && torrent.RdId != null)
         {
-            // Season-split siblings share ONE Real-Debrid torrent (RD dedups by
-            // infohash → one RdId for many local rows). Deleting the RD torrent
-            // when one sibling goes would yank the files out from under every
-            // other season still downloading. Ref-count by RdId: only delete the
-            // RD torrent once the last sibling is being removed.
+            // Season-split siblings all resolve to ONE underlying provider torrent
+            // (one pack, many per-season local rows). Deleting it when one sibling
+            // finishes yanks the files out from under every other season still
+            // downloading (observed on TorBox: one season finishing => the rest go
+            // "6/6 downloads failed" / "waiting for download links").
+            //
+            // Ref-count by SeasonSplitRealHash, NOT RdId: the real-pack infohash is
+            // identical across every sibling, whereas a shared RdId only exists when
+            // the provider dedups by hash (Real-Debrid does; TorBox may hand back a
+            // distinct id per add, which made the old RdId ref-count silently fail
+            // and delete the shared torrent anyway). Only delete the provider torrent
+            // once the LAST sibling of the pack is being removed.
             var lastSibling = true;
 
             if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
             {
                 var remaining = (await torrentData.Get())
                     .Count(t => t.TorrentId != torrentId &&
-                                String.Equals(t.RdId, torrent.RdId, StringComparison.Ordinal));
+                                String.Equals(t.SeasonSplitRealHash, torrent.SeasonSplitRealHash, StringComparison.OrdinalIgnoreCase));
 
                 lastSibling = remaining == 0;
 
                 if (!lastSibling)
                 {
-                    Log($"[SeasonSplit] Keeping RealDebrid torrent — {remaining} sibling(s) still share RdId {torrent.RdId}", torrent);
+                    Log($"[SeasonSplit] Keeping provider torrent — {remaining} sibling(s) still share pack {torrent.SeasonSplitRealHash}", torrent);
                 }
             }
 
