@@ -816,9 +816,29 @@ public class Torrents(
             {
                 var rdTorrent = torrent.RdId != null && providerTorrentsById.TryGetValue(torrent.RdId, out var providerTorrent) ? providerTorrent : null;
 
-                if (rdTorrent == null && Settings.Get.Provider.AutoDelete && torrent.RdStatus != TorrentStatus.Queued)
+                if (rdTorrent != null)
+                {
+                    // Already advanced in the loop above from the bulk list.
+                    continue;
+                }
+
+                if (Settings.Get.Provider.AutoDelete && torrent.RdStatus != TorrentStatus.Queued)
                 {
                     await Delete(torrent.TorrentId, true, false, true);
+                }
+                else if (torrent.RdId != null && torrent.Completed == null && torrent.RdStatus == TorrentStatus.Queued)
+                {
+                    // The torrent WAS added to the provider (RdId is set) but is
+                    // missing from this tick's bulk GetDownloads() result. That
+                    // happens when a provider list call errors out — HandleErrors
+                    // swallows it and returns an incomplete list — which otherwise
+                    // leaves an already-added, often-already-cached torrent frozen
+                    // at "Not Yet Added to Provider" (RdStatus.Queued) forever, with
+                    // no recovery path until a later bulk poll happens to succeed.
+                    // Fall back to a direct per-torrent lookup (UpdateData with no
+                    // bulk torrent -> GetInfo(RdId)) so it advances regardless of a
+                    // transient bulk-call hiccup.
+                    await UpdateTorrentClientData(torrent);
                 }
             }
         }
