@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Abstractions;
 using System.Security.Cryptography;
@@ -37,6 +38,17 @@ public class Torrents(
     private static readonly SemaphoreSlim RealDebridUpdateLock = new(1, 1);
 
     private static readonly SemaphoreSlim TorrentResetLock = new(1, 1);
+
+    // Tracks, per local torrent, when it first went missing from the provider's
+    // bulk current+queued list while we believed it was added (RdId set). Used to
+    // wait out a grace period before flagging an absent torrent for retry/re-add,
+    // so a freshly-added torrent the provider hasn't surfaced in its bulk list yet
+    // isn't needlessly torn down and re-added every tick.
+    private static readonly ConcurrentDictionary<Guid, DateTimeOffset> ProviderMissingSince = new();
+
+    // How long a torrent must be continuously absent from a SUCCESSFUL bulk fetch
+    // before we recover it. Comfortably longer than a tick + provider indexing lag.
+    private static readonly TimeSpan ProviderMissingGrace = TimeSpan.FromMinutes(5);
 
     private static readonly JsonSerializerOptions JsonSerializerOptions = new()
     {
@@ -473,7 +485,13 @@ public class Torrents(
 
             await torrentData.UpdateRdId(torrent, id);
 
-            await UpdateTorrentClientData(torrent);
+            // Deliberately do NOT poll the provider for this torrent immediately
+            // here. A just-added hash the provider hasn't indexed yet would make the
+            // per-torrent lookup (GetInfo) return not-found, which the TorBox client
+            // records as RdStatusRaw="deleted" - mislabelling a brand-new torrent.
+            // The torrent now has RdId set + RdStatus=Queued (correct: it IS queued
+            // at the provider); the next UpdateRdData tick reconciles it against the
+            // authoritative bulk current+queued list.
         }
         finally
         {
@@ -758,7 +776,23 @@ public class Torrents(
 
         try
         {
-            var rdTorrents = await DebridClient.GetDownloads();
+            IList<DebridClientTorrent> rdTorrents;
+
+            try
+            {
+                rdTorrents = await DebridClient.GetDownloads();
+            }
+            catch (Exception ex)
+            {
+                // A failed bulk fetch (transient provider/network error - HandleErrors
+                // re-throws non-rate-limit errors) must NOT be read as "every torrent
+                // is gone". Skip this tick entirely; the next successful fetch is the
+                // source of truth. (finally still releases the lock.)
+                logger.LogWarning(ex, "Bulk provider fetch failed; skipping torrent reconcile this tick");
+
+                return;
+            }
+
             var torrentsByRdId = CreateTorrentLookupByRdId(torrents);
             var providerTorrentsById = CreateProviderTorrentLookupById(rdTorrents);
 
@@ -812,33 +846,63 @@ public class Torrents(
                 }
             }
 
+            // Reconcile local torrents against the (successful) bulk list. Reaching
+            // here means GetDownloads() returned without error, so a torrent absent
+            // from providerTorrentsById is genuinely not in the provider's current+
+            // queued list — not hidden behind a failed fetch.
             foreach (var torrent in torrents)
             {
                 var rdTorrent = torrent.RdId != null && providerTorrentsById.TryGetValue(torrent.RdId, out var providerTorrent) ? providerTorrent : null;
 
                 if (rdTorrent != null)
                 {
-                    // Already advanced in the loop above from the bulk list.
+                    // Present on the provider and advanced in the loop above.
+                    ProviderMissingSince.TryRemove(torrent.TorrentId, out _);
+
                     continue;
                 }
 
+                // Existing behaviour: auto-delete provider-removed torrents when the
+                // user opted in (never for still-Queued ones).
                 if (Settings.Get.Provider.AutoDelete && torrent.RdStatus != TorrentStatus.Queued)
                 {
+                    ProviderMissingSince.TryRemove(torrent.TorrentId, out _);
+
                     await Delete(torrent.TorrentId, true, false, true);
+
+                    continue;
                 }
-                else if (torrent.RdId != null && torrent.Completed == null && torrent.RdStatus == TorrentStatus.Queued)
+
+                // Only torrents we believe we added (RdId set) and that aren't already
+                // finished/errored or pending a retry can be "missing from provider".
+                // A null RdId is simply not-yet-dequeued (the add loop handles it).
+                if (torrent.RdId == null || torrent.Completed != null || torrent.Retry != null)
                 {
-                    // The torrent WAS added to the provider (RdId is set) but is
-                    // missing from this tick's bulk GetDownloads() result. That
-                    // happens when a provider list call errors out — HandleErrors
-                    // swallows it and returns an incomplete list — which otherwise
-                    // leaves an already-added, often-already-cached torrent frozen
-                    // at "Not Yet Added to Provider" (RdStatus.Queued) forever, with
-                    // no recovery path until a later bulk poll happens to succeed.
-                    // Fall back to a direct per-torrent lookup (UpdateData with no
-                    // bulk torrent -> GetInfo(RdId)) so it advances regardless of a
-                    // transient bulk-call hiccup.
-                    await UpdateTorrentClientData(torrent);
+                    ProviderMissingSince.TryRemove(torrent.TorrentId, out _);
+
+                    continue;
+                }
+
+                // Added (RdId set) but absent from the provider's bulk list. Could be
+                // a not-yet-indexed fresh add, a hash the provider re-keyed, or a
+                // genuinely dropped torrent. Wait out a grace window so a fresh add
+                // isn't churned; after that, recover by flagging for retry. The retry
+                // path (RetryTorrent, fired from TorrentRunner when Retry is set)
+                // re-adds the torrent — rebuilding the synthetic magnet for
+                // season-split siblings — and is itself bounded by RetryCount/
+                // TorrentRetryAttempts, so this never freezes and never loops forever.
+                var missingSince = ProviderMissingSince.GetOrAdd(torrent.TorrentId, _ => DateTimeOffset.UtcNow);
+
+                if (DateTimeOffset.UtcNow - missingSince > ProviderMissingGrace)
+                {
+                    logger.LogWarning("Torrent {name} (RdId {rdId}) absent from the provider's bulk list for over {grace} minutes; flagging for retry / re-add",
+                                      torrent.RdName,
+                                      torrent.RdId,
+                                      ProviderMissingGrace.TotalMinutes);
+
+                    ProviderMissingSince.TryRemove(torrent.TorrentId, out _);
+
+                    await UpdateComplete(torrent.TorrentId, "Torrent not present on provider; retrying", DateTimeOffset.UtcNow, true);
                 }
             }
         }
