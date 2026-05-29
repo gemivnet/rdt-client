@@ -39,6 +39,14 @@ public class Torrents(
 
     private static readonly SemaphoreSlim TorrentResetLock = new(1, 1);
 
+    // Serializes the season-split shared-provider-torrent ref-count decision (not
+    // the network delete, which runs outside it). Without it two siblings of the
+    // same pack removed concurrently could both observe the other still present and
+    // skip, leaking the provider torrent. Because each sibling's local row is
+    // deleted before it takes this lock, the later counter always sees the earlier
+    // one gone, so exactly one sibling is left to delete the provider torrent.
+    private static readonly SemaphoreSlim SeasonSplitDeleteLock = new(1, 1);
+
     // Tracks, per local torrent, when it first went missing from the provider's
     // bulk current+queued list while we believed it was added (RdId set). Used to
     // wait out a grace period before flagging an absent torrent for retry/re-add,
@@ -658,25 +666,41 @@ public class Torrents(
             // distinct id per add, which made the old RdId ref-count silently fail
             // and delete the shared torrent anyway). Only delete the provider torrent
             // once the LAST sibling of the pack is being removed.
-            var lastSibling = true;
+            var deleteProviderTorrent = true;
 
             if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
             {
-                var remaining = (await torrentData.Get())
-                    .Count(t => t.TorrentId != torrentId &&
-                                String.Equals(t.SeasonSplitRealHash, torrent.SeasonSplitRealHash, StringComparison.OrdinalIgnoreCase));
+                // Serialize ONLY the ref-count decision (cheap, no network I/O):
+                // this torrent's local row was already removed above (when
+                // deleteData), so concurrent sibling removals of the same pack can't
+                // both observe the other still present and skip — leaking the shared
+                // provider torrent. The provider delete itself runs outside the lock
+                // so a slow delete on one pack doesn't serialize deletes of unrelated
+                // packs.
+                await SeasonSplitDeleteLock.WaitAsync();
 
-                lastSibling = remaining == 0;
-
-                if (!lastSibling)
+                try
                 {
-                    Log($"[SeasonSplit] Keeping provider torrent — {remaining} sibling(s) still share pack {torrent.SeasonSplitRealHash}", torrent);
+                    var remaining = (await torrentData.Get())
+                        .Count(t => t.TorrentId != torrentId &&
+                                    String.Equals(t.SeasonSplitRealHash, torrent.SeasonSplitRealHash, StringComparison.OrdinalIgnoreCase));
+
+                    deleteProviderTorrent = remaining == 0;
+
+                    if (!deleteProviderTorrent)
+                    {
+                        Log($"[SeasonSplit] Keeping provider torrent — {remaining} sibling(s) still share pack {torrent.SeasonSplitRealHash}", torrent);
+                    }
+                }
+                finally
+                {
+                    SeasonSplitDeleteLock.Release();
                 }
             }
 
-            if (lastSibling)
+            if (deleteProviderTorrent)
             {
-                Log($"Deleting RealDebrid Torrent", torrent);
+                Log($"Deleting provider torrent", torrent);
 
                 try
                 {
@@ -1479,8 +1503,10 @@ public class Torrents(
         // "Season 03" folder form, while rejecting range folders like
         // "S01-S05" and adjacent seasons (S30, S13). A bare "\bS03\b" fails on
         // the common contiguous "S03E05" naming (no word boundary before "E"),
-        // so we anchor on the episode marker instead. Kept in sync with the
-        // Sonarr fork's BuildSeasonIncludeRegex.
+        // so we anchor on the episode marker instead. The third alternative
+        // matches the "NxNN" form (e.g. "12x07") that non-English packs use, so
+        // a whole-season grab from such a pack doesn't match nothing ("all files
+        // excluded"). Kept in sync with the Sonarr fork's SeasonSplitIncludeRegex.
         var nums = seasons.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var values = new System.Collections.Generic.List<String>(nums.Length);
         foreach (var n in nums)
@@ -1502,6 +1528,6 @@ public class Torrents(
 
         var group = values.Count == 1 ? values[0] : $"(?:{String.Join("|", values)})";
 
-        return $"(?i)(?<![A-Za-z0-9])(?:S0*{group}(?=[ ._-]?E\\d)|season[ ._-]*0*{group}(?![0-9]))";
+        return $"(?i)(?<![A-Za-z0-9])(?:S0*{group}(?=[ ._-]?E\\d)|season[ ._-]*0*{group}(?![0-9])|0*{group}x\\d{{2,3}}(?![0-9]))";
     }
 }
