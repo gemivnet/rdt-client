@@ -105,29 +105,18 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
 
         Log("Seleting files", torrent);
 
-        if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
-        {
-            // Season-split sibling: this RD torrent is shared by several local
-            // torrents, each scoped to a different season via its own
-            // IncludeRegex. Selecting only one sibling's season here would
-            // deselect every other sibling's files (last writer wins on RD).
-            // So select ALL files on RD now; each sibling re-applies its own
-            // season filter locally when it picks links to download.
-            Log("[SeasonSplit] Sibling torrent — selecting ALL files on RD (per-season filter applied locally)", torrent);
-            files = [.. torrent.Files];
-        }
-        else if (torrent.DownloadAction == TorrentDownloadAction.DownloadManual)
+        if (torrent.DownloadAction == TorrentDownloadAction.DownloadManual)
         {
             Log("Selecting manual selected files", torrent);
             files = torrent.Files.Where(m => torrent.ManualFiles.Any(f => m.Path.EndsWith(f))).ToList();
-            files = files.Where(f => fileFilter.IsDownloadable(torrent, f.Path, f.Bytes)).ToList();
         }
         else
         {
             Log("Selecting files", torrent);
             files = [.. torrent.Files];
-            files = files.Where(f => fileFilter.IsDownloadable(torrent, f.Path, f.Bytes)).ToList();
         }
+
+        files = files.Where(f => fileFilter.IsDownloadable(torrent, f.Path, f.Bytes)).ToList();
 
         Log($"Selecting {files.Count}/{torrent.Files.Count} files", torrent);
 
@@ -138,30 +127,7 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
             return 0;
         }
 
-        // Season-split siblings share ONE RD torrent. The first sibling selects
-        // its files (all of them); every other sibling then finds the RD torrent
-        // already past file selection. Re-calling selectFiles on it errors, which
-        // used to leave those siblings stuck at "waiting for file selection"
-        // forever (FilesSelected never got set, so downloads were never created).
-        // Skip the call once the shared torrent has moved on, and tolerate an
-        // "already selected" error if we raced — either way the files are selected
-        // and the sibling can advance.
-        if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) &&
-            torrent.RdStatus != TorrentStatus.WaitingForFileSelection)
-        {
-            Log("[SeasonSplit] Shared RD torrent already past file selection; not re-selecting", torrent);
-
-            return fileIds.Length;
-        }
-
-        try
-        {
-            await GetClient().Torrents.SelectFilesAsync(torrent.RdId!, [.. fileIds]);
-        }
-        catch (Exception ex) when (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
-        {
-            Log($"[SeasonSplit] selectFiles errored on shared RD torrent (likely already selected by a sibling), treating as done: {ex.Message}", torrent);
-        }
+        await GetClient().Torrents.SelectFilesAsync(torrent.RdId!, [.. fileIds]);
 
         return fileIds.Length;
     }
@@ -197,24 +163,14 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
                 torrentClientTorrent = await GetInfo(torrent.RdId) ?? throw new($"Resource not found");
             }
 
-            // Season-split sibling: keep the synthetic per-season name set at
-            // add-time (e.g. "Show S10 …"). The RD torrent's filename is the
-            // whole pack ("Show S01-S19 …"); letting it overwrite RdName makes
-            // Sonarr see a multi-season pack — it mislabels the queue season and
-            // refuses to import ("Multi-season download, unable to import").
-            // Siblings share one RD torrent, so they'd all collapse to the pack
-            // name otherwise.
-            if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
+            if (!String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
             {
-                if (!String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
-                {
-                    torrent.RdName = torrentClientTorrent.Filename;
-                }
+                torrent.RdName = torrentClientTorrent.Filename;
+            }
 
-                if (!String.IsNullOrWhiteSpace(torrentClientTorrent.OriginalFilename))
-                {
-                    torrent.RdName = torrentClientTorrent.OriginalFilename;
-                }
+            if (!String.IsNullOrWhiteSpace(torrentClientTorrent.OriginalFilename))
+            {
+                torrent.RdName = torrentClientTorrent.OriginalFilename;
             }
 
             if (torrentClientTorrent.Bytes > 0)
@@ -304,51 +260,6 @@ public class RealDebridDebridClient(ILogger<RealDebridDebridClient> logger, IHtt
 
         Log($"Torrent has {torrent.Files.Count(m => m.Selected)} selected files out of {torrent.Files.Count} files, found {downloadLinks.Count} links, torrent ended: {torrent.RdEnded}",
             torrent);
-
-        // Season-split sibling: the shared RD torrent has ALL files selected, so
-        // its links cover every season. Real-Debrid returns one link per selected
-        // file, positionally aligned to the selected-file list. Zip them back
-        // together and keep only the links whose file matches THIS sibling's
-        // per-season IncludeRegex — that's how one downloaded pack fans out into
-        // the correct per-season grabs.
-        if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
-        {
-            var selectedFiles = torrent.Files.Where(m => m.Selected).ToList();
-
-            if (selectedFiles.Count != downloadLinks.Count)
-            {
-                // Real-Debrid returns one link per servable file and silently OMITS
-                // links for infringing-filtered files - so a persistent shortfall
-                // means the missing files are blocked. We can't positionally map a
-                // partial link set back to the selected files to season-filter it,
-                // so don't hang forever (this used to stick at "waiting for download
-                // links" indefinitely). Wait briefly for stragglers, then fail.
-                if (torrent.RdEnded.HasValue && (DateTime.UtcNow - torrent.RdEnded.Value.ToUniversalTime()).TotalSeconds > 120)
-                {
-                    throw new($"Real-Debrid returned only {downloadLinks.Count} of {selectedFiles.Count} download links; the rest are unavailable (likely infringing-filtered).");
-                }
-
-                Log($"[SeasonSplit] Selected files ({selectedFiles.Count}) != links ({downloadLinks.Count}); waiting for all links before season-filtering", torrent);
-
-                return null;
-            }
-
-            var filtered = new List<DownloadInfo>();
-
-            for (var i = 0; i < downloadLinks.Count; i++)
-            {
-                var file = selectedFiles[i];
-
-                if (fileFilter.IsDownloadable(torrent, file.Path, file.Bytes))
-                {
-                    filtered.Add(downloadLinks[i]);
-                }
-            }
-
-            Log($"[SeasonSplit] Kept {filtered.Count}/{downloadLinks.Count} links matching this sibling's season filter (IncludeRegex='{torrent.IncludeRegex}')", torrent);
-
-            return filtered;
-        }
 
         // Check if all the links are set that have been selected
         if (torrent.Files.Count(m => m.Selected) == downloadLinks.Count)
