@@ -4,6 +4,7 @@ using System.Reflection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
+using Polly.CircuitBreaker;
 using Polly.Timeout;
 using RateLimitHeaders.Polly;
 using RdtClient.Service.BackgroundServices;
@@ -128,6 +129,32 @@ public static class DiConfig
 
                 return new((TimeSpan?)null);
             }
+        });
+
+        // Circuit breaker: when the provider starts failing en masse (sustained
+        // 429s / timeouts), STOP hammering it. Without this, every one of the many
+        // concurrent calls independently retries and waits out the full per-attempt
+        // timeout, so total load never drops — the provider stays throttled and the
+        // TorrentRunner tick wedges waiting on calls that never succeed. Once the
+        // failure ratio over the sampling window is exceeded the circuit opens and
+        // further calls fail fast (BrokenCircuitException) for BreakDuration, which
+        // sheds load and lets the provider recover; callers treat the fast failure
+        // like any other transient error (skip the reconcile tick / leave the
+        // torrent queued for the next tick) rather than blocking.
+        builder.AddCircuitBreaker(new CircuitBreakerStrategyOptions<HttpResponseMessage>
+        {
+            ShouldHandle = args => args.Outcome switch
+            {
+                { Exception: HttpRequestException } => PredicateResult.True(),
+                { Exception: TimeoutRejectedException } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.RequestTimeout } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.TooManyRequests } => PredicateResult.True(),
+                _ => PredicateResult.False()
+            },
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            BreakDuration = TimeSpan.FromSeconds(30)
         });
 
         builder.AddTimeout(new TimeoutStrategyOptions
