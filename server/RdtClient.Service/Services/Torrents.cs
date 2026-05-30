@@ -39,14 +39,6 @@ public class Torrents(
 
     private static readonly SemaphoreSlim TorrentResetLock = new(1, 1);
 
-    // Serializes the season-split shared-provider-torrent ref-count decision (not
-    // the network delete, which runs outside it). Without it two siblings of the
-    // same pack removed concurrently could both observe the other still present and
-    // skip, leaking the provider torrent. Because each sibling's local row is
-    // deleted before it takes this lock, the later counter always sees the earlier
-    // one gone, so exactly one sibling is left to delete the provider torrent.
-    private static readonly SemaphoreSlim SeasonSplitDeleteLock = new(1, 1);
-
     // Tracks, per local torrent, when it first went missing from the provider's
     // bulk current+queued list while we believed it was added (RdId set). Used to
     // wait out a grace period before flagging an absent torrent for retry/re-add,
@@ -201,97 +193,24 @@ public class Torrents(
         return nzbNewTorrent;
     }
 
-    public virtual async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent, String? realMagnet = null)
+    public virtual async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent)
     {
-        // SeasonSplit: a synthetic magnet from a Sonarr fork carries two
-        // optional `x.` query parameters that override how we talk to the
-        // debrid provider. We strip them out of the magnet before parsing
-        // so MonoTorrent.MagnetLink doesn't choke on unknown params.
-        var (cleanMagnet, embeddedRealMagnet, embeddedSeasons) = ExtractSeasonSplitParams(magnetLink);
-
-        var effectiveRealMagnet = !String.IsNullOrWhiteSpace(realMagnet) ? realMagnet : embeddedRealMagnet;
-
-        // Defensive: older Sonarr-fork builds shipped the *synthetic* magnet in
-        // the realMagnet form param (it carries a synthetic xt plus a nested
-        // x.realmagnet=). Peel any wrapper off so the debrid provider always
-        // receives a resolvable magnet rather than a synthetic infohash.
-        if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
-        {
-            var (peeledClean, peeledReal, _) = ExtractSeasonSplitParams(effectiveRealMagnet);
-            effectiveRealMagnet = !String.IsNullOrWhiteSpace(peeledReal) ? peeledReal : peeledClean;
-        }
-        // Embedded x.includeseasons drives the per-season file filter. Apply it
-        // when there's no IncludeRegex yet OR when the only IncludeRegex is the
-        // global default — the magnet's explicit season is more specific than a
-        // catch-all default. An explicit per-torrent override (which differs from
-        // the default) still wins.
-        var defaultIncludeRegex = Settings.Get.Integrations.Default.IncludeRegex;
-        if (!String.IsNullOrWhiteSpace(embeddedSeasons) &&
-            (String.IsNullOrWhiteSpace(torrent.IncludeRegex) ||
-             String.Equals(torrent.IncludeRegex, defaultIncludeRegex, StringComparison.Ordinal)))
-        {
-            torrent.IncludeRegex = SeasonsToIncludeRegex(embeddedSeasons);
-            logger.LogInformation("[SeasonSplit] Magnet-embedded seasons={seasons} -> IncludeRegex='{regex}'",
-                                  embeddedSeasons, torrent.IncludeRegex);
-        }
-
-        // SeasonSplit: when realMagnet is supplied (via form param or x.realmagnet),
-        // hash is taken from the synthetic magnetLink (so siblings stay distinct
-        // in the local DB and qBit API), while the real magnet is what we ship
-        // to the debrid provider.
-        var debridMagnet = String.IsNullOrWhiteSpace(effectiveRealMagnet) ? cleanMagnet : effectiveRealMagnet;
-        var enriched = await enricher.EnrichMagnetLink(debridMagnet);
+        var enriched = await enricher.EnrichMagnetLink(magnetLink);
         MagnetLink magnet;
 
         try
         {
-            magnet = MagnetLink.Parse(cleanMagnet);
+            magnet = MagnetLink.Parse(magnetLink);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "{ex.Message}, trying to parse {magnetLink}", ex.Message, cleanMagnet);
+            logger.LogError(ex, "{ex.Message}, trying to parse {magnetLink}", ex.Message, magnetLink);
 
-            throw new($"{ex.Message}, trying to parse {cleanMagnet}");
-        }
-
-        if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
-        {
-            logger.LogInformation("[SeasonSplit] Using real magnet for debrid (length={debridLen}), local synth hash from urls (length={synthLen})",
-                                  debridMagnet.Length, cleanMagnet.Length);
-
-            // Stamp the real pack infohash so the one-to-many handling can find
-            // every per-season sibling that shares this Real-Debrid torrent
-            // (RD dedups by infohash, so all siblings collapse to one RdId).
-            // Several local torrents (distinct synthetic Hash) -> one real hash.
-            try
-            {
-                torrent.SeasonSplitRealHash = MagnetLink.Parse(debridMagnet).InfoHashes.V1OrV2.ToHex();
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "[SeasonSplit] Could not parse real magnet for SeasonSplitRealHash; one-to-many sibling handling disabled for this torrent");
-            }
+            throw new($"{ex.Message}, trying to parse {magnetLink}");
         }
 
         if (!String.IsNullOrWhiteSpace(Settings.Get.General.BannedTrackers))
         {
-            // Check the trackers of the magnet actually sent to the debrid
-            // provider (the real pack magnet for season-split), not the synthetic
-            // one — otherwise the banned-tracker filter is bypassed for the real
-            // content. They usually share trackers, but don't assume it.
-            var trackerCheckUrls = magnet.AnnounceUrls;
-            if (!String.IsNullOrWhiteSpace(effectiveRealMagnet))
-            {
-                try
-                {
-                    trackerCheckUrls = MagnetLink.Parse(debridMagnet).AnnounceUrls;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "[SeasonSplit] Could not parse real magnet for banned-tracker check; using synthetic magnet trackers");
-                }
-            }
-
             var bannedTrackers = Settings.Get.General.BannedTrackers.Split(',');
 
             foreach (var bannedTracker in bannedTrackers)
@@ -303,9 +222,9 @@ public class Torrents(
                     continue;
                 }
 
-                if (trackerCheckUrls != null)
+                if (magnet.AnnounceUrls != null)
                 {
-                    var bannedUrls = trackerCheckUrls.Where(m => m.Trim().ToLower().Contains(bannedTrackerCompare)).ToList();
+                    var bannedUrls = magnet.AnnounceUrls.Where(m => m.Trim().ToLower().Contains(bannedTrackerCompare)).ToList();
 
                     if (bannedUrls.Count > 0)
                     {
@@ -654,62 +573,15 @@ public class Torrents(
 
         if (deleteRdTorrent && torrent.RdId != null)
         {
-            // Season-split siblings all resolve to ONE underlying provider torrent
-            // (one pack, many per-season local rows). Deleting it when one sibling
-            // finishes yanks the files out from under every other season still
-            // downloading (observed on TorBox: one season finishing => the rest go
-            // "6/6 downloads failed" / "waiting for download links").
-            //
-            // Ref-count by SeasonSplitRealHash, NOT RdId: the real-pack infohash is
-            // identical across every sibling, whereas a shared RdId only exists when
-            // the provider dedups by hash (Real-Debrid does; TorBox may hand back a
-            // distinct id per add, which made the old RdId ref-count silently fail
-            // and delete the shared torrent anyway). Only delete the provider torrent
-            // once the LAST sibling of the pack is being removed.
-            var deleteProviderTorrent = true;
+            Log($"Deleting RealDebrid Torrent", torrent);
 
-            if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
+            try
             {
-                // Serialize ONLY the ref-count decision (cheap, no network I/O):
-                // this torrent's local row was already removed above (when
-                // deleteData), so concurrent sibling removals of the same pack can't
-                // both observe the other still present and skip — leaking the shared
-                // provider torrent. The provider delete itself runs outside the lock
-                // so a slow delete on one pack doesn't serialize deletes of unrelated
-                // packs.
-                await SeasonSplitDeleteLock.WaitAsync();
-
-                try
-                {
-                    var remaining = (await torrentData.Get())
-                        .Count(t => t.TorrentId != torrentId &&
-                                    String.Equals(t.SeasonSplitRealHash, torrent.SeasonSplitRealHash, StringComparison.OrdinalIgnoreCase));
-
-                    deleteProviderTorrent = remaining == 0;
-
-                    if (!deleteProviderTorrent)
-                    {
-                        Log($"[SeasonSplit] Keeping provider torrent — {remaining} sibling(s) still share pack {torrent.SeasonSplitRealHash}", torrent);
-                    }
-                }
-                finally
-                {
-                    SeasonSplitDeleteLock.Release();
-                }
+                await DebridClient.Delete(torrent);
             }
-
-            if (deleteProviderTorrent)
+            catch
             {
-                Log($"Deleting provider torrent", torrent);
-
-                try
-                {
-                    await DebridClient.Delete(torrent);
-                }
-                catch
-                {
-                    // ignored
-                }
+                // ignored
             }
         }
 
@@ -1006,24 +878,6 @@ public class Torrents(
                     var bytes = Convert.FromBase64String(torrent.FileOrMagnet!);
 
                     newTorrent = await AddFileToDebridQueue(bytes, torrent);
-                }
-                else if (!String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
-                {
-                    // Season-split sibling: FileOrMagnet holds the *real* pack
-                    // magnet while Hash is the synthetic per-season infohash. A
-                    // plain re-add would resolve to the real pack hash and the
-                    // torrent would lose its season identity (and collide with
-                    // its siblings). Rebuild a synthetic magnet carrying the
-                    // synthetic hash and pass the real magnet via realMagnet, so
-                    // the add path reproduces the synthetic local hash, ships the
-                    // real magnet to the provider, and keeps this sibling's
-                    // IncludeRegex / SeasonSplitRealHash intact.
-                    var dn = !String.IsNullOrWhiteSpace(torrent.RdName) ? Uri.EscapeDataString(torrent.RdName) : torrent.Hash;
-                    var syntheticMagnet = $"magnet:?xt=urn:btih:{torrent.Hash}&dn={dn}";
-
-                    logger.LogInformation("[SeasonSplit] Retrying sibling with synthetic hash {hash} (real pack {realHash})", torrent.Hash, torrent.SeasonSplitRealHash);
-
-                    newTorrent = await AddMagnetToDebridQueue(syntheticMagnet, torrent, torrent.FileOrMagnet!);
                 }
                 else
                 {
@@ -1448,86 +1302,4 @@ public class Torrents(
         return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
     }
 
-    // SeasonSplit helpers: pulls the x.realmagnet / x.includeseasons hints out
-    // of the magnet URL and returns a cleaned magnet plus the extracted values.
-    private static (String CleanMagnet, String? RealMagnet, String? Seasons) ExtractSeasonSplitParams(String magnetLink)
-    {
-        if (String.IsNullOrEmpty(magnetLink) ||
-            (magnetLink.IndexOf("x.realmagnet=", StringComparison.OrdinalIgnoreCase) < 0 &&
-             magnetLink.IndexOf("x.includeseasons=", StringComparison.OrdinalIgnoreCase) < 0))
-        {
-            return (magnetLink, null, null);
-        }
-
-        var queryIdx = magnetLink.IndexOf('?');
-        if (queryIdx < 0)
-        {
-            return (magnetLink, null, null);
-        }
-
-        var prefix = magnetLink.Substring(0, queryIdx + 1);
-        var query = magnetLink.Substring(queryIdx + 1);
-        var parts = query.Split('&', StringSplitOptions.RemoveEmptyEntries);
-
-        String? realMagnet = null;
-        String? seasons = null;
-        var kept = new System.Collections.Generic.List<String>(parts.Length);
-
-        foreach (var part in parts)
-        {
-            var eq = part.IndexOf('=');
-            var key = eq < 0 ? part : part.Substring(0, eq);
-            var val = eq < 0 ? "" : Uri.UnescapeDataString(part.Substring(eq + 1));
-
-            if (String.Equals(key, "x.realmagnet", StringComparison.OrdinalIgnoreCase))
-            {
-                realMagnet = val;
-            }
-            else if (String.Equals(key, "x.includeseasons", StringComparison.OrdinalIgnoreCase))
-            {
-                seasons = val;
-            }
-            else
-            {
-                kept.Add(part);
-            }
-        }
-
-        return (prefix + String.Join("&", kept), realMagnet, seasons);
-    }
-
-    private static String SeasonsToIncludeRegex(String seasons)
-    {
-        // Builds a per-file IncludeRegex matching only the given season(s).
-        // Matches the "S03E05" episode form (also S3E5 / S03.E05) and the
-        // "Season 03" folder form, while rejecting range folders like
-        // "S01-S05" and adjacent seasons (S30, S13). A bare "\bS03\b" fails on
-        // the common contiguous "S03E05" naming (no word boundary before "E"),
-        // so we anchor on the episode marker instead. The third alternative
-        // matches the "NxNN" form (e.g. "12x07") that non-English packs use, so
-        // a whole-season grab from such a pack doesn't match nothing ("all files
-        // excluded"). Kept in sync with the Sonarr fork's SeasonSplitIncludeRegex.
-        var nums = seasons.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var values = new System.Collections.Generic.List<String>(nums.Length);
-        foreach (var n in nums)
-        {
-            // Season 0 is valid (specials, "S00E01"). Cap at < 100.
-            if (Int32.TryParse(n, out var v) && v >= 0 && v < 100)
-            {
-                values.Add(v.ToString());
-            }
-        }
-
-        if (values.Count == 0)
-        {
-            // No tokens at all -> no filter (""). Tokens that were all invalid /
-            // out-of-range -> a never-match pattern, so we DON'T silently fall
-            // back to "no filter" and download the entire pack.
-            return nums.Length == 0 ? "" : "(?!)";
-        }
-
-        var group = values.Count == 1 ? values[0] : $"(?:{String.Join("|", values)})";
-
-        return $"(?i)(?<![A-Za-z0-9])(?:S0*{group}(?=[ ._-]?E\\d)|season[ ._-]*0*{group}(?![0-9])|0*{group}x\\d{{2,3}}(?![0-9]))";
-    }
 }

@@ -637,7 +637,7 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
         }
     }
 
-    public async Task TorrentsAddMagnet(String magnetLink, String? category, Int32? priority, String? realMagnet = null, String? includeRegexOverride = null)
+    public async Task TorrentsAddMagnet(String magnetLink, String? category, Int32? priority)
     {
         logger.LogDebug($"Add magnet {category}");
 
@@ -650,7 +650,7 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
             DownloadAction = Settings.Get.Integrations.Default.OnlyDownloadAvailableFiles ? TorrentDownloadAction.DownloadAvailableFiles : TorrentDownloadAction.DownloadAll,
             FinishedAction = TorrentFinishedAction.None,
             DownloadMinSize = Settings.Get.Integrations.Default.MinFileSize,
-            IncludeRegex = String.IsNullOrWhiteSpace(includeRegexOverride) ? Settings.Get.Integrations.Default.IncludeRegex : includeRegexOverride,
+            IncludeRegex = Settings.Get.Integrations.Default.IncludeRegex,
             ExcludeRegex = Settings.Get.Integrations.Default.ExcludeRegex,
             TorrentRetryAttempts = Settings.Get.Integrations.Default.TorrentRetryAttempts,
             DownloadRetryAttempts = Settings.Get.Integrations.Default.DownloadRetryAttempts,
@@ -659,17 +659,7 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
             Priority = priority ?? (Settings.Get.Integrations.Default.Priority > 0 ? Settings.Get.Integrations.Default.Priority : null)
         };
 
-        if (!String.IsNullOrWhiteSpace(includeRegexOverride))
-        {
-            logger.LogInformation("[SeasonSplit] Per-torrent IncludeRegex override applied: '{regex}' for category={category}", includeRegexOverride, category);
-        }
-
-        if (!String.IsNullOrWhiteSpace(realMagnet))
-        {
-            logger.LogInformation("[SeasonSplit] Real magnet differs from synthetic magnet. Local hash will follow synth; debrid will receive real magnet. category={category}", category);
-        }
-
-        await torrents.AddMagnetToDebridQueue(magnetLink, torrent, realMagnet);
+        await torrents.AddMagnetToDebridQueue(magnetLink, torrent);
     }
 
     public async Task TorrentsAddFile(Byte[] fileBytes, String? category, Int32? priority)

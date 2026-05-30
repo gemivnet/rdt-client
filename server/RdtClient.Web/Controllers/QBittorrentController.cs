@@ -447,28 +447,13 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
 
         var urls = request.Urls.Split("\n");
 
-        // SeasonSplit: RealMagnet/IncludeRegex are single-torrent overrides. The
-        // qBit API allows batching multiple newline-separated URLs in one add,
-        // but Sonarr sends one magnet per request, so applying the same override
-        // to every URL in a batch would be wrong. Guard against silent misuse.
-        if ((!String.IsNullOrWhiteSpace(request.RealMagnet) || !String.IsNullOrWhiteSpace(request.IncludeRegex)) &&
-            urls.Count(u => !String.IsNullOrWhiteSpace(u)) > 1)
-        {
-            return BadRequest("RealMagnet/IncludeRegex overrides require a single magnet URL per request.");
-        }
-
         foreach (var url in urls)
         {
             try
             {
                 if (url.StartsWith("magnet"))
                 {
-                    if (!String.IsNullOrWhiteSpace(request.RealMagnet) || !String.IsNullOrWhiteSpace(request.IncludeRegex))
-                    {
-                        logger.LogInformation("[SeasonSplit] TorrentsAdd received: category={category} realMagnet={realMagnet} includeRegex='{includeRegex}'",
-                                              request.Category, String.IsNullOrEmpty(request.RealMagnet) ? "(none)" : "set", request.IncludeRegex);
-                    }
-                    await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null, request.RealMagnet, request.IncludeRegex);
+                    await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null);
                 }
                 else if (url.StartsWith("http"))
                 {
@@ -811,17 +796,6 @@ public class QBTorrentsAddRequest
     public String? Urls { get; set; }
     public String? Category { get; set; }
     public Int32? Priority { get; set; }
-
-    // SeasonSplit extension: the underlying real magnet for the multi-season
-    // pack. When set, rdt-client uses this magnet to talk to the debrid
-    // provider, but stores the torrent locally under the (synthetic) hash
-    // parsed from `Urls`. Allows sibling season grabs of the same pack to
-    // appear as distinct qBit torrents while sharing one RD download.
-    public String? RealMagnet { get; set; }
-
-    // SeasonSplit extension: per-torrent IncludeRegex override. Sonarr fork
-    // sends a regex like `\bS03\b` so only that season's files materialise.
-    public String? IncludeRegex { get; set; }
 }
 
 public class QBTorrentsSetCategoryRequest
