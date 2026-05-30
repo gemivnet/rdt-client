@@ -193,11 +193,7 @@ public class AllDebridDebridClient(ILogger<AllDebridDebridClient> logger, IAllDe
 
             torrentClientTorrent ??= await GetInfo(torrent.RdId);
 
-            // Season-split sibling: keep the synthetic per-season name; the
-            // provider's filename is the whole pack and would make Sonarr treat
-            // this as a multi-season download (see RealDebridDebridClient).
-            if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash) &&
-                !String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
+            if (!String.IsNullOrWhiteSpace(torrentClientTorrent.Filename))
             {
                 torrent.RdName = torrentClientTorrent.Filename;
             }

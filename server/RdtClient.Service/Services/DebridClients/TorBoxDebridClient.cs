@@ -218,23 +218,14 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
 
             var rdTorrent = torrentClientTorrent ?? await GetInfo(torrent.RdId, torrent.Type) ?? throw new($"Resource not found");
 
-            // Season-split sibling: keep the synthetic per-season name set at
-            // add-time ("Survivor Collection S02"). TorBox reports the whole
-            // pack's name ("...S01-S21"); letting it overwrite RdName means Sonarr
-            // can't map the download back to a season's episodes, so nothing
-            // imports (the queue shows it with no episodes / Unknown quality). The
-            // Real-Debrid client guards the same way.
-            if (String.IsNullOrWhiteSpace(torrent.SeasonSplitRealHash))
+            if (!String.IsNullOrWhiteSpace(rdTorrent.Filename))
             {
-                if (!String.IsNullOrWhiteSpace(rdTorrent.Filename))
-                {
-                    torrent.RdName = rdTorrent.Filename;
-                }
+                torrent.RdName = rdTorrent.Filename;
+            }
 
-                if (!String.IsNullOrWhiteSpace(rdTorrent.OriginalFilename))
-                {
-                    torrent.RdName = rdTorrent.OriginalFilename;
-                }
+            if (!String.IsNullOrWhiteSpace(rdTorrent.OriginalFilename))
+            {
+                torrent.RdName = rdTorrent.OriginalFilename;
             }
 
             if (rdTorrent.Bytes > 0)
@@ -325,21 +316,7 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
         }
         else
         {
-            // Season-split: the sibling is tracked under a synthetic Hash, but
-            // TorBox knows the torrent by its REAL infohash. RdId IS that real
-            // hash (TorBox returns it from the add and GetInfo uses it), so use it
-            // here too. Lowercase it because TorBox's hash lookup is
-            // case-sensitive and SeasonSplitRealHash/Hash can be upper-cased -
-            // an upper-case hash misses, leaving the grab stuck at "waiting for
-            // download links".
-            var lookupHash = (!String.IsNullOrWhiteSpace(torrent.RdId) ? torrent.RdId : torrent.Hash)?.ToLowerInvariant();
-
-            if (String.IsNullOrWhiteSpace(lookupHash))
-            {
-                return null;
-            }
-
-            var torrentId = await HandleErrors(() => GetClient().Torrents.GetHashInfoAsync(lookupHash, true));
+            var torrentId = await HandleErrors(() => GetClient().Torrents.GetHashInfoAsync(torrent.Hash, true));
             id = torrentId?.Id;
         }
 
