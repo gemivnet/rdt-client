@@ -276,7 +276,15 @@ public class TorBoxDebridClient(ILogger<TorBoxDebridClient> logger, IHttpClientF
                     _ when rdTorrent.Status != null && rdTorrent.Status.StartsWith("repair", StringComparison.OrdinalIgnoreCase) => TorrentStatus.Downloading,
                     _ when rdTorrent.Status != null && rdTorrent.Status.StartsWith("verifying", StringComparison.OrdinalIgnoreCase) => TorrentStatus.Downloading,
                     _ when rdTorrent.Status != null && rdTorrent.Status.StartsWith("uploading", StringComparison.OrdinalIgnoreCase) => TorrentStatus.Uploading,
-                    "cached" => TorrentStatus.Finished,
+                    // "cached" means TorBox HAS the data, but the files are not
+                    // necessarily materialised for download yet (download_present).
+                    // Promoting straight to Finished here made CreateDownloads /
+                    // UnrestrictLink run before the file links exist -> TorBox returns
+                    // DATABASE_ERROR on requestdl (and sometimes a 150-byte truncated
+                    // body). The Host=="True" (download_present) branch above already
+                    // promotes to Finished once the files are actually ready, so keep
+                    // "cached" as Downloading until then.
+                    "cached" => TorrentStatus.Downloading,
                     "missing" => TorrentStatus.Error, // NZB missing parts
                     "error" => TorrentStatus.Error,
                     _ when rdTorrent.Status != null && rdTorrent.Status.StartsWith("failed", StringComparison.OrdinalIgnoreCase) => TorrentStatus.Error,

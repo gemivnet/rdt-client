@@ -39,6 +39,14 @@ public class TorrentRunner(
     private const Int64 TruncatedVideoFloorBytes = 1024 * 1024; // 1 MiB
     private static readonly String[] VideoExtensions = [".mkv", ".mp4", ".avi", ".ts", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".flv", ".webm"];
 
+    // Provider-side ghost guard: a torrent the provider parks in a non-terminal
+    // "downloading" state (TorBox "checking" / "stalled (no seeds)") that never
+    // generates any download links sits forever with 0 Downloads, pinning a
+    // download slot and starving the dequeue (downloadingTorrentsCount keeps it
+    // counted). If it hasn't produced a single link this long after being added,
+    // treat it as dead and fail it so the slot frees and the *arr app fails over.
+    private static readonly TimeSpan ProviderNoLinksStallTimeout = TimeSpan.FromMinutes(30);
+
     public static Boolean IsPausedForLowDiskSpace { get; set; }
 
     public static (Int64 Speed, Int64 BytesTotal, Int64 BytesDone) GetStats(Guid downloadId)
@@ -474,7 +482,13 @@ public class TorrentRunner(
             }
             else
             {
-                var downloadingTorrentsCount = allTorrents.Count(m => m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
+                // Count only torrents that are genuinely occupying a download slot:
+                // non-terminal RdStatus AND not yet Completed. A torrent marked
+                // Completed (e.g. failed/stalled-out, pending cleanup) keeps its
+                // RdStatus until it's deleted, so without the Completed guard it
+                // would keep being counted and could pin the slot budget.
+                var downloadingTorrentsCount = allTorrents.Count(m => m.Completed == null &&
+                                                                      m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
 
                 var maxParallelDownloads = Settings.Get.Provider.MaxParallelDownloads;
 
@@ -483,7 +497,10 @@ public class TorrentRunner(
                                 maxParallelDownloads,
                                 torrentsToAddToProvider.Count);
 
-                var dequeueCount = maxParallelDownloads == 0 ? torrentsToAddToProvider.Count : maxParallelDownloads - downloadingTorrentsCount;
+                // Clamp to non-negative: if more torrents are "downloading" than the
+                // budget (e.g. ghosts pinning slots), an unclamped subtraction goes
+                // negative and Take(-1) silently dequeues nothing, freezing the queue.
+                var dequeueCount = maxParallelDownloads == 0 ? torrentsToAddToProvider.Count : Math.Max(0, maxParallelDownloads - downloadingTorrentsCount);
 
                 foreach (var torrent in torrentsToAddToProvider.Take(dequeueCount))
                 {
@@ -816,6 +833,35 @@ public class TorrentRunner(
                             }
                         }
                     }
+                }
+
+                // Provider-side ghost guard: a torrent stuck in the non-terminal
+                // Downloading state (TorBox "checking" / "stalled (no seeds)") that
+                // has never generated a download link (Downloads.Count == 0) will
+                // never finish on its own and has no handler above, so it pins a
+                // download slot indefinitely and starves the dequeue.
+                //
+                // Only treat it as a dead magnet when it shows NO sign of life:
+                // 0% progress AND no seeders AND no speed. A torrent TorBox is
+                // genuinely downloading (RdProgress > 0, or seeders/speed > 0) shares
+                // the same Downloading status and 0 links until it caches, so without
+                // these guards we'd nuke a working pack at the 30m mark and discard
+                // all its TorBox-side progress (retry re-adds from scratch). The
+                // (Int64) progress cast preserves percent, so RdProgress == 0 reliably
+                // means 0% downloaded. Failing routes through the bounded retry path
+                // so the slot frees and Sonarr fails over to a seeded release.
+                if (torrent.RdStatus == TorrentStatus.Downloading &&
+                    torrent.Downloads.Count == 0 &&
+                    (torrent.RdProgress ?? 0) == 0 &&
+                    (torrent.RdSeeders ?? 0) == 0 &&
+                    (torrent.RdSpeed ?? 0) == 0 &&
+                    DateTimeOffset.UtcNow - (torrent.RdAdded ?? torrent.Added) > ProviderNoLinksStallTimeout)
+                {
+                    LogError($"Torrent stalled on provider (status '{torrent.RdStatusRaw}', 0% / no seeders / no links after {ProviderNoLinksStallTimeout.TotalMinutes:n0}m); failing it so the slot frees and it can fail over", null, torrent);
+
+                    await torrents.UpdateComplete(torrent.TorrentId, $"Stalled on provider ('{torrent.RdStatusRaw}') — 0% with no seeders or download links after {ProviderNoLinksStallTimeout.TotalMinutes:n0} minutes", DateTimeOffset.UtcNow, true);
+
+                    continue;
                 }
 
                 // Check if torrent is complete, or if we don't want to download any files to the host.
