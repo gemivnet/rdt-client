@@ -37,6 +37,15 @@ public class TorrentRunner(
     // by a provider 429 / dropped connection (the real episodes are far larger).
     // Used when the total size was never reported, so the byte-ratio check can't run.
     private const Int64 TruncatedVideoFloorBytes = 1024 * 1024; // 1 MiB
+    // Any completed download below this is a provider error-body stub, not a real
+    // file: the debrid provider serves a tiny JSON/HTML error body (e.g. a ~150 B
+    // to ~30 KB "DATABASE_ERROR" page under 429/load) in place of the file, and the
+    // downloader reports it as a SUCCESSFUL completion. Real selected files are far
+    // larger (the provider min-file-size filter alone is megabytes), so this floor
+    // can't catch a legitimate file. Catches the non-video case where BytesDone ==
+    // BytesTotal (the stub's own size), which slips past both the byte-ratio guard
+    // and the video-only floor.
+    private const Int64 TruncatedStubFloorBytes = 64 * 1024; // 64 KiB
     private static readonly String[] VideoExtensions = [".mkv", ".mp4", ".avi", ".ts", ".m4v", ".wmv", ".mpg", ".mpeg", ".m2ts", ".flv", ".webm"];
 
     // Provider-side ghost guard: a torrent the provider parks in a non-terminal
@@ -304,6 +313,16 @@ public class TorrentRunner(
                     else if (isVideo && downloadClient.BytesDone < TruncatedVideoFloorBytes)
                     {
                         error = $"Truncated download: video file completed at only {downloadClient.BytesDone} bytes (provider rate-limit or dropped connection; total size was not reported)";
+                    }
+                    else if (downloadClient.BytesDone > 0 && downloadClient.BytesDone < TruncatedStubFloorBytes)
+                    {
+                        // Non-video stub where BytesDone == BytesTotal (or total was
+                        // never reported): the provider returned a tiny error-body in
+                        // place of the file. Fail it at completion time so it routes
+                        // to the bounded retry / fail-over path immediately instead of
+                        // squatting a download slot for the full stall-detection window
+                        // (which starves every torrent's queue).
+                        error = $"Truncated download: completed at only {downloadClient.BytesDone} bytes (provider rate-limit / error-body stub)";
                     }
                 }
 
