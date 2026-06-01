@@ -1,40 +1,48 @@
 # rdt-client — seasonsplit fork
 
-> This is a **fork of [rogerfar/rdt-client](https://github.com/rogerfar/rdt-client)**
-> with a small extension that makes it the download-client half of the
-> **[gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)** season-split fork.
-> Everything not described here is unchanged upstream rdt-client — see the
-> [README](./README.md).
+> This is a **fork of [rogerfar/rdt-client](https://github.com/rogerfar/rdt-client)**,
+> the download-client side of the **[gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)**
+> season-split setup. Everything not described here is unchanged upstream
+> rdt-client — see the [README](./README.md).
 
-## Why this fork exists
+## What this fork is (and isn't) anymore
 
-The Sonarr fork splits a multi-season torrent pack into per-season "synthetic"
-grabs. Each sibling grab points at the **same** underlying Real-Debrid torrent,
-but Sonarr needs them tracked as distinct queue items and only wants one
-season's files imported per grab. Stock rdt-client can't do that: it keys
-torrents by the magnet's real infohash (so siblings collapse into one) and has
-only a global include-regex.
+An earlier version of this fork added per-season **"sibling"** machinery: extra
+`realMagnet` / `includeRegex` inputs on the qBittorrent `torrents/add` endpoint,
+synthetic-hash bookkeeping, and a reference-counted shared-provider-torrent
+delete — so one real pack could be fanned out into N per-season torrents inside
+rdt-client. **That approach has been removed.** The Sonarr fork now grabs a
+multi-season pack as a **single** download and lets Sonarr's per-file import
+place each episode, so rdt-client no longer needs to know anything about seasons.
 
-This fork adds two **optional, backwards-compatible** inputs on the qBittorrent
-`torrents/add` endpoint. When absent, behaviour is identical to upstream.
+> If you find references to `x.realmagnet`, `x.includeseasons`,
+> `ExtractSeasonSplitParams`, or a `SeasonSplitDeleteLock` in older docs or commit
+> messages, that code no longer exists (`git grep` finds zero hits in `server/`).
 
-## What changed
+## What the fork actually changes today
 
-Two new fields on `QBTorrentsAddRequest`, also accepted as `x.` parameters
-embedded in the magnet URL (so they survive any qBit-API client):
+It is now a **TorBox-focused rdt-client with resilience hardening** for the large,
+whole-pack downloads the season-split workflow produces. The additions over
+upstream:
 
-| Field / magnet param | Purpose |
-|---|---|
-| `realMagnet` / `x.realmagnet=` | The real pack magnet sent to the debrid provider. The local torrent hash is taken from the (synthetic) magnet in `urls`, so sibling seasons stay distinct in the DB and qBit API while sharing one RD download. |
-| `includeRegex` / `x.includeseasons=` | Per-torrent include-regex override (e.g. `(?i)\bS19\b`). Only files matching it are materialised, so one season's episodes land instead of the whole pack. |
+- **Stuck-state recovery** — torrents frozen at "Not Yet Added to Provider" are
+  reconciled and recovered instead of hanging, and a single slow per-torrent
+  provider lookup can no longer freeze the whole poll loop (`Services/Torrents.cs`).
+- **Stall detection + stub guards** — downloads that stop progressing, or where
+  the provider returns non-video stubs / fewer usable links than expected, are
+  failed fast instead of sitting at 100% forever
+  (`Services/DownloadClient.cs`, `Services/TorrentRunner.cs`).
+- **Provider circuit breaker** — added to the provider resilience pipeline so a
+  flapping provider backs off instead of hammering the API (`DiConfig.cs`).
+- **Error visibility** — the underlying provider error is surfaced through the
+  qBittorrent `TorrentInfo` (`rdt_error`) so Sonarr can show why a grab failed
+  (`Helpers/TorrentDtoMapper.cs`).
+- **`ssmetadata` endpoint** — returns a torrent's file list from the provider
+  *without* adding a download, used to preview a pack's contents
+  (`Web/Controllers/QBittorrentController.cs`).
 
-Touched files:
-- `server/RdtClient.Web/Controllers/QBittorrentController.cs` — accept the two new request fields.
-- `server/RdtClient.Service/Services/QBittorrent.cs` — thread them into the torrent.
-- `server/RdtClient.Service/Services/Torrents.cs` — `ExtractSeasonSplitParams` pulls `x.realmagnet`/`x.includeseasons` out of the magnet; `AddMagnetToDebridQueue` uses the real magnet for the provider but the synthetic hash locally.
-
-All changes log at Information level with a `[SeasonSplit]` prefix, e.g.
-`[SeasonSplit] TorrentsAdd received: ... includeRegex='(?i)\bS19\b'`.
+Deployment is **TorBox-only**; the RealDebrid / AllDebrid / Premiumize clients
+were reverted to upstream behaviour.
 
 ## Keeping up to date
 
@@ -42,7 +50,6 @@ All changes log at Information level with a `[SeasonSplit]` prefix, e.g.
 git remote add upstream https://github.com/rogerfar/rdt-client.git   # one time
 git fetch upstream
 git rebase upstream/main seasonsplit
-# Conflicts, if any, are confined to the three files above.
 ```
 
 The build workflow pins the embedded version to upstream's latest release tag so
@@ -51,10 +58,18 @@ the in-app "update available" banner stays quiet.
 ## Docker image
 
 Pushed on every commit to the `seasonsplit` branch by
-`.github/workflows/seasonsplit-image.yml`:
+[`.github/workflows/seasonsplit-image.yml`](.github/workflows/seasonsplit-image.yml):
 
 - `ghcr.io/gemivnet/rdt-client-seasonsplit:latest`
 
 Use it together with `ghcr.io/gemivnet/sonarr-seasonsplit:latest`. The Sonarr
 fork's [`FORK.md`](https://github.com/gemivnet/Sonarr/blob/seasonsplit/FORK.md)
-documents the full end-to-end flow.
+documents the multi-season grab behaviour.
+
+---
+
+> **Leftover field.** The database still has a `SeasonSplitRealHash` column
+> (migration `20260523140000`) plus a few DTO/UI references, left from the removed
+> sibling design to avoid an EF round-trip. Nothing writes it anymore, so it is
+> always null and inert (`IsSeasonSplit` is therefore always false). Safe to excise
+> in a future cleanup.
