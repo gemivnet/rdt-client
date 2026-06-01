@@ -1,7 +1,7 @@
 # Real-Debrid Torrent & Usenet Client
 
-> ⚠️ **This is a fork.** It adds per-season file selection so it can serve as the
-> download client for the [gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)
+> ⚠️ **This is a fork.** A TorBox-focused build with resilience hardening, used as
+> the download client for the [gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)
 > season-split fork. See **[SEASON_SPLIT.md](./SEASON_SPLIT.md)** for what changed
 > and why. All other behaviour is unchanged upstream rdt-client (below).
 
