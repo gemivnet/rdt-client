@@ -1,7 +1,7 @@
 # Real-Debrid Torrent & Usenet Client
 
-> ⚠️ **This is a fork.** It adds per-season file selection so it can serve as the
-> download client for the [gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)
+> ⚠️ **This is a fork.** A TorBox-focused build with resilience hardening, used as
+> the download client for the [gemivnet/Sonarr](https://github.com/gemivnet/Sonarr)
 > season-split fork. See **[SEASON_SPLIT.md](./SEASON_SPLIT.md)** for what changed
 > and why. All other behaviour is unchanged upstream rdt-client (below).
 
@@ -173,7 +173,7 @@ It has the following options:
 
 ### Connecting Sonarr/Radarr
 
-RdtClient emulates the qBittorrent web protocol and allow applications to use those APIs. This way you can use Sonarr and Radarr to download directly from RealDebrid.
+RdtClient emulates the qBittorrent web protocol and allows applications to use those APIs. This way you can use Sonarr and Radarr to download directly from RealDebrid.
 
 1. Login to Sonarr or Radarr and click `Settings`.
 1. Go to the `Download Client` tab and click the plus to add.
